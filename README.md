@@ -1,8 +1,45 @@
-# SIMHA AiOps Manager Suite
+<p align="center">
+  <img src="https://img.shields.io/badge/SIMHA-AiOps-102421?style=for-the-badge&logo=linux&logoColor=white" alt="SIMHA AiOps" />
+</p>
+
+<h1 align="center">SIMHA AiOps Manager Suite</h1>
+
+<p align="center">
+  <a href="https://github.com/simhaonline/aiops/releases"><img src="https://img.shields.io/badge/release-v1.0.0-e65b35?style=flat-square" alt="Release v1.0.0" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1d755f?style=flat-square" alt="MIT License" /></a>
+  <a href="https://github.com/simhaonline/aiops/actions"><img src="https://img.shields.io/badge/validation-passing-1d755f?style=flat-square&logo=githubactions&logoColor=white" alt="Validation passing" /></a>
+  <a href="https://ubuntu.com/download/server"><img src="https://img.shields.io/badge/platform-Ubuntu%2024.04-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu 24.04" /></a>
+</p>
+
+<p align="center">
+  <a href="dashboard/PRODUCT.md"><img src="https://img.shields.io/badge/UI-SIMHA%20Studio-102421?style=flat-square&logo=react&logoColor=white" alt="SIMHA Studio" /></a>
+  <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-loopback%20%2B%20broker-1d755f?style=flat-square&logo=letsencrypt&logoColor=white" alt="Loopback and broker security" /></a>
+  <a href="THIRD-PARTY-NOTICES.md"><img src="https://img.shields.io/badge/credits-third--party%20notices-61706d?style=flat-square&logo=opensourceinitiative&logoColor=white" alt="Third-party notices" /></a>
+</p>
+
+<p align="center"><em>Secure lifecycle management for AI runtimes, isolated projects, providers, and operations.</em></p>
 
 **Release:** `1.0.0`
 **Target OS:** Ubuntu Server 24.04 LTS  
 **Repository:** `simhaonline/aiops`
+
+### Technology and integration badges
+
+<p>
+  <a href="dashboard/apps/web/package.json"><img src="https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=nextdotjs&logoColor=white" alt="Next.js 16" /></a>
+  <a href="dashboard/apps/api/package.json"><img src="https://img.shields.io/badge/NestJS-11-E0234E?style=flat-square&logo=nestjs&logoColor=white" alt="NestJS 11" /></a>
+  <a href="dashboard/broker/go.mod"><img src="https://img.shields.io/badge/Go-broker-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go broker" /></a>
+  <a href="dashboard/telemetry/collector.py"><img src="https://img.shields.io/badge/Python-telemetry-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python telemetry" /></a>
+  <a href="scripts/litellm-manager"><img src="https://img.shields.io/badge/LiteLLM-routing-5B3DF5?style=flat-square" alt="LiteLLM routing" /></a>
+  <a href="scripts/ollama-manager"><img src="https://img.shields.io/badge/Ollama-Cloud%20models-000000?style=flat-square" alt="Ollama Cloud models" /></a>
+  <a href="scripts/wireguard-manager"><img src="https://img.shields.io/badge/WireGuard-VPN-88171A?style=flat-square" alt="WireGuard VPN" /></a>
+  <a href="scripts/nginx-manager"><img src="https://img.shields.io/badge/Nginx-TLS%20edge-009639?style=flat-square&logo=nginx&logoColor=white" alt="Nginx TLS edge" /></a>
+  <a href="scripts/collection-manager"><img src="https://img.shields.io/badge/Scrapling-restricted%20collector-61706d?style=flat-square" alt="Scrapling restricted collector" /></a>
+</p>
+
+Badges identify the technologies and integrations used by the repository; they
+are not endorsements. Ownership, trademarks, licenses, and upstream links are
+listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Simha AiOps is a production-oriented collection of lifecycle managers for operating an AI development/inference server without mixing every runtime into one monolithic installer.
 
