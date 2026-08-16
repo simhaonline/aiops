@@ -34,6 +34,11 @@ CI execution plane
 Never share a Docker/Podman socket, writable home directory, agent credentials,
 or secret file between these zones.
 
+WireGuard client configurations and QR exports are stored with mode `0600`
+under `/etc/wireguard/client`. The directory is root-only (`0700`). On the first
+managed operation after an upgrade, files from the legacy
+`/root/wireguard-clients` location are migrated automatically.
+
 ## 2. Initial manager installation
 
 For a checked-out repository:

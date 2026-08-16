@@ -16,7 +16,7 @@
 #   Interface: wg0
 #   UDP port: 1320
 #   Dual stack: IPv4 + IPv6
-#   Client configs: /root/wireguard-clients
+#   Client configs: /etc/wireguard/client
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -29,7 +29,8 @@ WG_PORT="1320"
 WG_DIR="/etc/wireguard"
 WG_CONFIG="${WG_DIR}/${WG_INTERFACE}.conf"
 WG_ENV="${WG_DIR}/${WG_INTERFACE}.env"
-CLIENT_DIR="/root/wireguard-clients"
+CLIENT_DIR="${WG_DIR}/client"
+LEGACY_CLIENT_DIR="/root/wireguard-clients"
 CLIENT_META_DIR="${WG_DIR}/clients-${WG_INTERFACE}"
 SYSCTL_FILE="/etc/sysctl.d/99-wireguard-${WG_INTERFACE}.conf"
 LEGACY_SYSCTL_FILE="/etc/sysctl.d/99-wireguard.conf"
@@ -95,6 +96,45 @@ load_environment() {
 
     # shellcheck disable=SC1090
     source "$WG_ENV"
+
+    # The manager owns the client export location. Do not allow an older
+    # environment file to keep sensitive client material under /root.
+    CLIENT_DIR="${WG_DIR}/client"
+    migrate_legacy_client_storage
+}
+
+migrate_legacy_client_storage() {
+    local source target relative temp_file
+
+    install -d -m 700 "$CLIENT_DIR"
+
+    if [[ -d "$LEGACY_CLIENT_DIR" && "$LEGACY_CLIENT_DIR" != "$CLIENT_DIR" ]]; then
+        while IFS= read -r -d '' source; do
+            relative="${source#"${LEGACY_CLIENT_DIR}/"}"
+            target="${CLIENT_DIR}/${relative}"
+            install -d -m 700 "$(dirname -- "$target")"
+
+            if [[ -e "$target" ]]; then
+                cmp -s -- "$source" "$target" \
+                    || die "Cannot migrate client file; destination differs: $target"
+                rm -f -- "$source"
+            else
+                mv -- "$source" "$target"
+            fi
+        done < <(find "$LEGACY_CLIENT_DIR" -type f -print0)
+
+        find "$LEGACY_CLIENT_DIR" -depth -type d -empty -delete
+        [[ ! -d "$LEGACY_CLIENT_DIR" ]] \
+            || warn "Legacy client directory is not empty: $LEGACY_CLIENT_DIR"
+    fi
+
+    # Persist the canonical path so tools inspecting wg0.env see the current
+    # location even though load_environment also enforces it at runtime.
+    temp_file="$(mktemp)"
+    awk '!/^CLIENT_DIR=/' "$WG_ENV" > "$temp_file"
+    write_shell_variable "$temp_file" "CLIENT_DIR" "$CLIENT_DIR"
+    install -m 600 "$temp_file" "$WG_ENV"
+    rm -f -- "$temp_file"
 }
 
 interface_is_active() {
@@ -558,6 +598,9 @@ remove_client() {
     # shellcheck disable=SC1090
     source "$metadata_file"
 
+    CLIENT_CONFIG="${CLIENT_DIR}/${client_name}.conf"
+    CLIENT_QR="${CLIENT_DIR}/${client_name}-qr.png"
+
     prompt_yes_no "Remove client '${client_name}' permanently?" || {
         echo "Removal cancelled."
         return 0
@@ -606,6 +649,9 @@ show_client_qr() {
 
     # shellcheck disable=SC1090
     source "$metadata_file"
+
+    CLIENT_CONFIG="${CLIENT_DIR}/${client_name}.conf"
+    CLIENT_QR="${CLIENT_DIR}/${client_name}-qr.png"
 
     [[ -f "$CLIENT_CONFIG" ]] || die "Client configuration is missing: ${CLIENT_CONFIG}"
 
@@ -845,6 +891,7 @@ uninstall_wireguard() {
         # shellcheck disable=SC1090
         source "$WG_ENV"
     fi
+    CLIENT_DIR="${WG_DIR}/client"
 
     if [[ ! -e "$WG_CONFIG" && ! -e "$WG_ENV" ]]; then
         warn "WireGuard manager configuration is already absent."
@@ -871,6 +918,7 @@ uninstall_wireguard() {
     rm -f "$UFW_POLICY_BACKUP"
     rm -rf "$CLIENT_META_DIR"
     rm -rf "$CLIENT_DIR"
+    rm -rf "$LEGACY_CLIENT_DIR"
     rm -f "$MANAGER_PATH"
     rm -f /usr/local/sbin/wg-add-user /usr/local/sbin/wg-remove-user
 

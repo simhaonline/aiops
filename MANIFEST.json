@@ -114,8 +114,8 @@
     },
     "wireguard-manager": {
       "version": "1.0.0",
-      "sha256": "f98b706c98c7eba0d316439e628d2b49ac721f37d60c81fd6890253f05bad91b",
-      "size_bytes": 31059
+      "sha256": "5963ce2b2e3012f1c0695ee7bf771a716c00dd31abcf6d69294b07bd723a216a",
+      "size_bytes": 32890
     }
   },
   "installer_policy": {

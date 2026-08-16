@@ -8,6 +8,7 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 
 - Rebuilt `install.sh` as the complete 23-command suite bootstrap.
 - Added `aiops`, a safe phase-aware CLI dispatcher for every runtime manager.
+- Moved WireGuard client exports to `/etc/wireguard/client`, including automatic migration from the legacy root-home location.
 - Exact supported bootstrap:
   `curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh | bash`
 - Downloads and verifies `SHA256SUMS.txt`.

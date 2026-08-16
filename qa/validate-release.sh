@@ -190,6 +190,9 @@ pass "Forgejo and runner trust-zone regression"
 qa/aiops-regression-test.sh >/dev/null
 pass "Unified AiOps runtime CLI regression"
 
+qa/wireguard-manager-regression-test.sh >/dev/null
+pass "WireGuard client storage regression"
+
 # Test the real bootstrap download/check logic without Internet or mutation.
 # The mock covers both GitHub commit resolution and raw downloads from the
 # resulting immutable commit SHA.
