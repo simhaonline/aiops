@@ -11,6 +11,7 @@ Operational documentation:
 - [Administrator Operations Guide](ADMIN-GUIDE.md)
 - [User Operations Guide](USER-GUIDE.md)
 - [Project Isolation Guide](PROJECT-ISOLATION.md)
+- [Architecture, Lifecycle, and Context Report](ARCHITECTURE-REPORT.md)
 
 The maintained manager scripts are in `scripts/`; no historical manager copies
 are shipped in the production repository.
