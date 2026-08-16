@@ -2,7 +2,7 @@ import { Body, Controller, Headers, HttpException, HttpStatus, Post } from "@nes
 import { IsArray, IsIn, IsOptional, IsString, Matches } from "class-validator";
 import { PlatformService } from "./platform.service";
 
-const actions=["manager.verify","project.start","project.stop","project.verify","project.backup","collection.crawl","collection.verify"] as const;
+const actions=["manager.verify","project.verify","project.backup","collection.crawl","collection.verify"] as const;
 class OperationDto { @IsIn(actions) action!:typeof actions[number]; @IsOptional() @IsString() @Matches(/^\/srv\/projects\/[A-Za-z0-9._-]+$/) target?:string; @IsOptional() @IsArray() @IsString({each:true}) args?:string[]; }
 @Controller("operations") export class OperationsController {
   constructor(private readonly platform:PlatformService){}

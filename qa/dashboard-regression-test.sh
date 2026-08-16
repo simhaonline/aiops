@@ -28,9 +28,14 @@ grep -Fq 'camera=(self), microphone=(self)' dashboard/apps/web/next.config.ts
 grep -Fq 'operation is not allowlisted' dashboard/broker/main.go
 grep -Fq 'project symlink escapes /srv/projects' dashboard/broker/main.go
 grep -Fq 'context.WithTimeout' dashboard/broker/main.go
+grep -Fq 'case "project.start", "project.stop":' dashboard/broker/main.go
+! grep -Fq '"project.start"' dashboard/apps/api/src/operations.controller.ts
+! grep -Fq '"project.stop"' dashboard/apps/api/src/operations.controller.ts
 ! grep -Eq '(bash -c|sh -c|/bin/bash|/bin/sh)' dashboard/broker/main.go
 
 grep -Fq 'network_mode: host' scripts/aiops-dashboard-manager
+grep -Fq 'HOSTNAME: 127.0.0.1' scripts/aiops-dashboard-manager
+! grep -Fq 'HOSTNAME: 0.0.0.0' scripts/aiops-dashboard-manager
 grep -Fq 'cap_drop: [ALL]' scripts/aiops-dashboard-manager
 grep -Fq 'AIOPS_BROKER_SOCKET' scripts/aiops-dashboard-manager
 ! grep -Fq '/var/run/docker.sock:' scripts/aiops-dashboard-manager

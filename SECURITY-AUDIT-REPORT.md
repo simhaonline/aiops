@@ -2,7 +2,8 @@
 
 **Audit scope:** release `1.0.0`, current `main` tree  
 **Audit mode:** read-only source review, focused adversarial checks, and the existing release regression suite  
-**Status:** findings documented; runtime fixes are not included in this commit
+**Status:** critical broker and dashboard listener findings remediated in the
+follow-up commit; remaining findings are documented remediation work
 
 ## Executive summary
 
@@ -15,8 +16,8 @@ dashboard path that runs user-editable project Compose definitions as root.
 
 | File/location | Severity | Finding | Impact | Recommended fix |
 |---|---:|---|---|---|
-| `dashboard/broker/main.go:102-111`; `scripts/project-manager:52-64` | Critical | `project.start` invokes user-editable Compose and feature YAML through a root broker | A project owner may add privileged containers, host mounts, devices, or host networking and obtain host-level impact | Remove project start/stop from the privileged broker, or use a dedicated rootless project service plus a strict Compose policy validator |
-| `scripts/aiops-dashboard-manager:84-99` | High | Dashboard web container sets `HOSTNAME=0.0.0.0` while the documented boundary is loopback-only | Port 4600 may bypass the intended Nginx authentication/TLS edge | Set `HOSTNAME=127.0.0.1` and verify no non-loopback listener exists |
+| `dashboard/broker/main.go:102-111`; `scripts/project-manager:52-64` | Remediated | The previous `project.start` path could invoke user-editable Compose and feature YAML through a root broker | A project owner could have added privileged containers, host mounts, devices, or host networking | `project.start` and `project.stop` are now rejected by the broker/API; future project lifecycle must use a rootless project service and strict Compose policy validator |
+| `scripts/aiops-dashboard-manager:84-99` | Remediated | Dashboard web container previously set `HOSTNAME=0.0.0.0` while the documented boundary is loopback-only | Port 4600 could bypass the intended Nginx authentication/TLS edge | `HOSTNAME` is now set to `127.0.0.1`; deployment verification should still check listeners |
 | Root installers and mutable dependencies | High | Codex/Ollama installers, latest pip packages, mutable project images, and unpinned tool installs are executed or built | Upstream compromise can become root or service-account code execution | Pin versions, release digests, installer SHA-256 values, package hashes, and container image digests |
 | `dashboard/broker/main.go:44-59` | High | Any process in the broker socket group can call privileged operations without proving the dashboard token | A compromised local group member can invoke operations and spoof `actor` | Validate Unix peer credentials or use broker-side HMAC authentication |
 | `scripts/ollama-manager:672-847` | High | `chat`, `test`, and `benchmark` accept models outside the approved Cloud catalog | Free-model policy can be bypassed and paid/unapproved provider usage can occur | Validate every model against an approved local-to-remote mapping |
@@ -46,7 +47,7 @@ services:
     command: ["sh", "-c", "touch /host/tmp/aiops-compromised"]
 ```
 
-If the dashboard broker accepts `project.start`, it invokes
+Before remediation, if the dashboard broker accepted `project.start`, it invoked
 `/usr/local/bin/project-manager up /srv/projects/demo`. The project manager
 includes project-local Compose and feature files in the Docker invocation. Since
 the broker is root and has Docker access, this crosses project isolation.
@@ -60,6 +61,7 @@ case "project.start", "project.stop":
     )
 ```
 
+The immediate remediation rejects this operation at both the API and broker.
 The preferred long-term design is a rootless per-project Docker identity with a
 strict Compose schema validator and immutable image references.
 

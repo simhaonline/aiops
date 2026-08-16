@@ -312,8 +312,11 @@ translation, knowledge, workflow, project, registry, and operations surfaces.
 The capability contract routes through LiteLLM using capability-aware,
 verified-free-first model policy with explicit fallbacks. The web containers do
 not mount the Docker socket and cannot execute arbitrary commands. Its mutation
-API accepts only seven explicit operations, validates direct `/srv/projects`
-targets, times out execution, truncates output, and writes a JSON audit record.
+API accepts only five explicit operations (`manager.verify`, project verification
+and backup, and collection crawl/verification). It deliberately does not start
+or stop user-editable project Compose files through the privileged broker.
+Requests validate direct `/srv/projects` targets, time out execution, truncate
+output, and write a JSON audit record.
 The current Studio release establishes the UI and capability contract; full
 conversation persistence, streaming inference, media workers, and workflow
 execution remain subsequent backend layers. See

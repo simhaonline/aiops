@@ -88,7 +88,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: "4600"
-      HOSTNAME: 0.0.0.0
+      HOSTNAME: 127.0.0.1
       AIOPS_API_URL: http://127.0.0.1:4601
     network_mode: host
     depends_on: [api]

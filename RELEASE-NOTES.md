@@ -100,8 +100,10 @@ All maintained executable manager scripts now use manager version `1.0.0`.
   publication, and independent backup/restore.
 - Added an optional professional AiOps dashboard: responsive Next.js light/dark
   UI, validated NestJS API, dependency-free Python host telemetry, and a Go
-  Unix-socket broker restricted to seven allowlisted operations. Web containers
-  are loopback-only, capability-free, read-only, and never mount Docker socket.
+  Unix-socket broker restricted to five allowlisted operations. Project
+  start/stop is excluded from the privileged broker because project Compose
+  files are user-editable. Web containers are loopback-only, capability-free,
+  read-only, and never mount Docker socket.
 
 ## Forgejo infrastructure
 

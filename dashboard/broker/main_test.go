@@ -11,6 +11,13 @@ func TestRejectsUnlistedAction(t *testing.T) {
 		t.Fatal("arbitrary shell action accepted")
 	}
 }
+func TestProjectLifecycleIsRejected(t *testing.T) {
+	for _, action := range []string{"project.start", "project.stop"} {
+		if _, _, err := resolve(request{Action: action, Target: "/srv/projects/demo", Actor: "operator"}); err == nil {
+			t.Fatalf("%s must not be exposed through the privileged broker", action)
+		}
+	}
+}
 func TestProjectPathRejectsEscape(t *testing.T) {
 	if _, err := projectPath("/etc"); err == nil {
 		t.Fatal("outside path accepted")

@@ -18,8 +18,10 @@ processes:
 - Python telemetry collector on `127.0.0.1:9108`
 
 The web and API processes are unprivileged. Only the broker may invoke manager
-commands, and it accepts seven fixed operations with strict project/name
-validation. It does not implement arbitrary commands or an interactive shell.
+commands, and it accepts five fixed operations with strict project/name
+validation. Project start/stop is deliberately excluded because project Compose
+files are user-editable and must never be executed by the root broker. It does
+not implement arbitrary commands or an interactive shell.
 
 ## Development
 

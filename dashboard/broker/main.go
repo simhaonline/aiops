@@ -99,7 +99,7 @@ func resolve(r request) (string, []string, error) {
 			return "", nil, errors.New("manager.verify accepts no target or arguments")
 		}
 		return "/usr/local/bin/manager-suite", []string{"verify"}, nil
-	case "project.start", "project.stop", "project.verify", "project.backup":
+	case "project.verify", "project.backup":
 		path, err := projectPath(r.Target)
 		if err != nil {
 			return "", nil, err
@@ -107,8 +107,10 @@ func resolve(r request) (string, []string, error) {
 		if len(r.Args) > 0 {
 			return "", nil, errors.New("project operation arguments are not allowed")
 		}
-		verb := map[string]string{"project.start": "up", "project.stop": "down", "project.verify": "verify", "project.backup": "backup"}[r.Action]
+		verb := map[string]string{"project.verify": "verify", "project.backup": "backup"}[r.Action]
 		return "/usr/local/bin/project-manager", []string{verb, path}, nil
+	case "project.start", "project.stop":
+		return "", nil, errors.New("project lifecycle is not available through the privileged broker")
 	case "collection.crawl":
 		path, err := projectPath(r.Target)
 		if err != nil {
