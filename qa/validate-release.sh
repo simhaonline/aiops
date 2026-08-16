@@ -7,7 +7,7 @@ umask 027
 cd "$(dirname "$0")/.."
 
 readonly RELEASE_VERSION="1.0.0"
-readonly EXPECTED_MANAGERS=21
+readonly EXPECTED_MANAGERS=22
 
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 pass(){ printf '[PASS] %s\n' "$*"; }
@@ -35,7 +35,7 @@ pass "Required release files"
 manager_count="$(find scripts -maxdepth 1 -type f | wc -l)"
 [[ "$manager_count" -eq "$EXPECTED_MANAGERS" ]] || \
   die "Expected $EXPECTED_MANAGERS maintained manager scripts; found $manager_count."
-pass "21 maintained manager scripts"
+pass "22 maintained manager scripts"
 
 # Shell syntax: maintained managers, bootstrap and QA.
 for f in install.sh install-canonical-managers.sh scripts/* qa/*.sh; do
@@ -86,7 +86,7 @@ names = [
 "system-manager","docker-manager","forgejo-manager","forgejo-runner-manager","gvm-manager","miniconda-manager","nvm-manager",
 "ollama-manager","nginx-manager","wireguard-manager","harness-manager","hermes-manager",
 "codex-manager","claude-manager","opencode-manager","freebuff-manager","litellm-manager",
-"llmrouter-manager","project-manager","collection-manager","manager-suite",
+"llmrouter-manager","project-manager","collection-manager","aiops-dashboard-manager","manager-suite",
 ]
 for n in names:
     if order.count(n) != 1:
@@ -144,7 +144,7 @@ import hashlib, json
 root=Path(".")
 m=json.loads((root/"MANIFEST.json").read_text())
 assert m["release"]=="1.0.0"
-assert len(m["managers"])==21
+assert len(m["managers"])==22
 
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -180,6 +180,9 @@ pass "Project isolation backup/restore regression"
 
 qa/collection-manager-regression-test.sh >/dev/null
 pass "Scrapling collection policy/crawl/UI/backup/restore regression"
+
+qa/dashboard-regression-test.sh >/dev/null
+pass "Dashboard architecture/security/telemetry regression"
 
 qa/forgejo-isolation-regression-test.sh >/dev/null
 pass "Forgejo and runner trust-zone regression"

@@ -27,6 +27,7 @@ readonly MANAGERS=(
   llmrouter-manager
   project-manager
   collection-manager
+  aiops-dashboard-manager
   manager-suite
 )
 

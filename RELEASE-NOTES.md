@@ -6,7 +6,7 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 
 ### Installer
 
-- Rebuilt `install.sh` as the complete 21-manager bootstrap.
+- Rebuilt `install.sh` as the complete 22-manager bootstrap.
 - Exact supported bootstrap:
   `curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh | bash`
 - Downloads and verifies `SHA256SUMS.txt`.
@@ -73,6 +73,10 @@ All maintained executable manager scripts now use manager version `1.0.0`.
   source policy, domain allowlists, AI-targeted extraction, resource limits,
   checksum-protected outputs, a read-only loopback dashboard, managed Nginx/TLS
   publication, and independent backup/restore.
+- Added an optional professional AiOps dashboard: responsive Next.js light/dark
+  UI, validated NestJS API, dependency-free Python host telemetry, and a Go
+  Unix-socket broker restricted to seven allowlisted operations. Web containers
+  are loopback-only, capability-free, read-only, and never mount Docker socket.
 
 ## Forgejo infrastructure
 

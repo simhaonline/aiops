@@ -303,7 +303,35 @@ collection-manager restore /srv/backups/example-collections.tar.gz /srv/projects
 
 Inspect or remove its timer with `schedule-status` and `schedule-remove`.
 
-## 9. Backup policy
+## 9. AiOps dashboard
+
+Install from a trusted checkout of this repository:
+
+```bash
+sudo aiops-dashboard-manager install /path/to/aiops/dashboard
+sudo aiops-dashboard-manager verify
+sudo aiops-dashboard-manager nginx-setup ops.example.com admin@example.com aiopsadmin
+```
+
+The manager builds the Next.js and NestJS images, compiles the Go broker with a
+pinned toolchain container, installs the Python telemetry unit, generates the
+internal operation token, and binds all HTTP listeners to loopback. Nginx is the
+only remote entry point.
+
+Operational checks:
+
+```bash
+sudo aiops-dashboard-manager status
+sudo aiops-dashboard-manager logs 200
+sudo aiops-dashboard-manager backup /srv/backups/aiops-dashboard.tar.gz
+sudo aiops-dashboard-manager restore /srv/backups/aiops-dashboard.tar.gz --yes
+```
+
+Do not add a terminal, arbitrary command endpoint, Docker socket mount, or
+user-supplied executable path. Extend the broker by adding a named operation,
+strict argument validation, a timeout, tests, and an audit event.
+
+## 10. Backup policy
 
 Maintain at least three copies of critical data, on two storage types, with one
 copy offline or off-site. Encrypt archives before they leave trusted storage.

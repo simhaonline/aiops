@@ -1,0 +1,12 @@
+{
+  "name": "simha-aiops-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": ["apps/web", "apps/api"],
+  "scripts": {
+    "build": "npm run build -w @aiops/web && npm run build -w @aiops/api",
+    "dev": "npm run dev -w @aiops/web",
+    "test": "npm run test -w @aiops/api && go test ./broker/... && python3 -m unittest discover telemetry/tests"
+  },
+  "engines": {"node": ">=22"}
+}

@@ -20,7 +20,8 @@
 10. `litellm-manager` - Python/venv based; Nginx optional.
 11. `project-manager` - Docker Compose based, isolated per-project development.
 12. `collection-manager` - requires `project-manager` and Docker; isolated Scrapling collection workers.
-13. `manager-suite` - cross-manager health/inventory.
+13. `aiops-dashboard-manager` - Docker, Python 3 and repository dashboard source; Nginx optional.
+14. `manager-suite` - cross-manager health/inventory.
 
 ## Shared services
 
@@ -34,3 +35,7 @@ home/configuration mount and Compose network for every project.
 `collection-manager` stores collection policy and data inside the selected
 project, uses a pinned Scrapling image, and can publish its loopback dashboard
 through `nginx-manager`.
+
+`aiops-dashboard-manager` builds the Next.js and NestJS containers with Node
+22, compiles the Go broker in a pinned Go container, and runs dependency-free
+Python telemetry as an unprivileged systemd service.

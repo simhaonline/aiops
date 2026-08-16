@@ -1,0 +1,18 @@
+FROM node:22.22.0-alpine@sha256:e4bf2a82ad0a4037d28035ae71529873c069b13eb0455466ae0bc13363826e34 AS build
+WORKDIR /app
+COPY package.json ./
+COPY package-lock.json ./
+COPY apps/web/package.json apps/web/package.json
+COPY apps/api/package.json apps/api/package.json
+RUN npm ci --workspace=@aiops/web --include-workspace-root --no-audit --no-fund
+COPY apps/web apps/web
+RUN npm run build --workspace=@aiops/web
+
+FROM node:22.22.0-alpine@sha256:e4bf2a82ad0a4037d28035ae71529873c069b13eb0455466ae0bc13363826e34
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /app/apps/web/.next/standalone ./
+COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
+USER node
+EXPOSE 4600
+CMD ["node","apps/web/server.js"]

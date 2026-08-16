@@ -23,6 +23,13 @@ robots directives, site terms, privacy law, retention requirements and source
 rate limits. Never collect personal, sensitive, paywalled or authenticated data
 without explicit legal and data-owner approval.
 
+The AiOps dashboard is not a shell. Its web/API containers run read-only with
+all capabilities dropped and no Docker socket. Mutations require a protected
+token and pass through a group-restricted Unix socket to a Go broker. The
+broker accepts only enumerated actions, direct children of `/srv/projects`,
+safe collection names, bounded execution time and bounded response output;
+every attempted operation is appended to the audit log.
+
 Checksums protect against accidental corruption or inconsistent payloads. They are not a substitute for repository/account security or signed-release provenance.
 
 ## Runtime exposure

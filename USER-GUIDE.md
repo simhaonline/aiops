@@ -220,7 +220,20 @@ Use only sources you are authorized to collect. Do not collect personal,
 sensitive, authenticated or paywalled content. The administrator-provided
 dashboard URL is read-only and protected by the Nginx edge.
 
-## 9. Goose
+## 9. AiOps dashboard
+
+Open the administrator-provided HTTPS URL. The interface follows the operating
+system theme initially and remembers light or dark mode on that browser. Use it
+to review platform health, host load and memory, project inventory, control
+service status, findings, and audited activity.
+
+The initial interface is intentionally observability-first. A visible button
+does not bypass CLI safety controls: approved mutations are validated by the
+API and restricted broker, and destructive workflows continue to require
+explicit confirmation. Never paste secrets into search, names, or operation
+arguments.
+
+## 10. Goose
 
 Enable and install Goose inside this project only:
 

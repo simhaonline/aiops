@@ -77,6 +77,13 @@ collection-manager crawl /srv/projects/example documentation
 
 ## Step 8 - Final health check
 
+Optionally install the central operations UI before the final gate:
+
+```bash
+sudo aiops-dashboard-manager install /path/to/aiops/dashboard
+sudo aiops-dashboard-manager verify
+```
+
 ```bash
 manager-suite versions
 sudo manager-suite verify

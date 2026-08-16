@@ -2,6 +2,11 @@
   "release": "1.0.0",
   "target_os": "Ubuntu 24.04 LTS",
   "managers": {
+    "aiops-dashboard-manager": {
+      "version": "1.0.0",
+      "sha256": "1b96e7ee43801d02a08a69ca2afa66da7eff6e1d00981decb901bb5cde1b0cbe",
+      "size_bytes": 10960
+    },
     "claude-manager": {
       "version": "1.0.0",
       "sha256": "a0a78f6db258264595d9be18e902c2c5ec66c65368e589cb620be1257533285e",
@@ -64,8 +69,8 @@
     },
     "manager-suite": {
       "version": "1.0.0",
-      "sha256": "5498420c8c203b5229dc6687d1d286902f74da598c5d35ff9c6602488c8acc3b",
-      "size_bytes": 7326
+      "sha256": "4cc2cc1f2139909d853a7b725e8764f22ea1aa9129265db132887d83c624f11d",
+      "size_bytes": 7727
     },
     "miniconda-manager": {
       "version": "1.0.0",
@@ -109,7 +114,7 @@
     }
   },
   "installer_policy": {
-    "default_installs": "21 canonical manager scripts only",
+    "default_installs": "22 canonical manager scripts only",
     "main_ref_resolution": "resolve to immutable Git commit before payload fetch"
   }
 }

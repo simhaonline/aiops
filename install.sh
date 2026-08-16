@@ -32,6 +32,7 @@ readonly MANAGERS=(
   llmrouter-manager
   project-manager
   collection-manager
+  aiops-dashboard-manager
   manager-suite
 )
 
@@ -210,7 +211,7 @@ main(){
     as_root bash ./install-canonical-managers.sh all
   )
 
-  say "Installed all 21 canonical manager commands."
+  say "Installed all 22 canonical manager commands."
   say "No managed runtime/service was installed, repaired, restarted or updated."
   say "Recommended next steps:"
   say "  manager-suite install-order"

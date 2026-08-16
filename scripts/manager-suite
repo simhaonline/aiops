@@ -24,6 +24,7 @@ readonly MANAGERS=(
   llmrouter-manager
   project-manager
   collection-manager
+  aiops-dashboard-manager
 )
 
 say(){ printf '%-22s %s\n' "$1" "$2"; }
@@ -49,6 +50,7 @@ runtime_present() {
     litellm-manager) [[ -x /opt/litellm/current/bin/litellm ]] ;;
     llmrouter-manager) [[ -x /root/.nvm/default-bin/lmrouter ]] ;;
     project-manager|collection-manager) command -v docker >/dev/null 2>&1 ;;
+    aiops-dashboard-manager) [[ -f /etc/systemd/system/aiops-dashboard.service ]] ;;
     *) return 1 ;;
   esac
 }
@@ -149,7 +151,8 @@ Phase 5 - AI gateways / routing
 Phase 6 - Suite health gate
  19. project-manager (create isolated development environments as needed)
  20. collection-manager (isolated Scrapling collections; optional)
- 21. manager-suite
+ 21. aiops-dashboard-manager (optional secure operations UI)
+ 22. manager-suite
 
 The one-line bootstrap installs manager SCRIPT files only. Runtime installation
 remains explicit; run '<manager> install' only for the components you need.
@@ -224,6 +227,11 @@ project-manager
 collection-manager
   REQUIRES project-manager and Docker. Runs pinned Scrapling workers with
   per-project collection policy, data, dashboard, edge, backup and restore.
+
+aiops-dashboard-manager
+  REQUIRES Docker, Python 3 and the repository dashboard source. Builds the
+  Next.js/NestJS UI/API, Go broker and Python telemetry services. nginx-manager
+  is optional for its authenticated HTTPS edge.
 
 manager-suite
   No runtime dependency; discovers managers and coordinates health reporting.

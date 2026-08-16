@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+readonly MANAGER_VERSION="1.0.0"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 027
+
+readonly MANAGER_PATH="/usr/local/bin/aiops-dashboard-manager"
+readonly APP_DIR="/opt/aiops-dashboard"
+readonly CONFIG_DIR="/etc/aiops-dashboard"
+readonly DATA_DIR="/var/lib/aiops-dashboard"
+readonly LOG_DIR="/var/log/aiops-dashboard"
+readonly RUN_DIR="/run/aiops-dashboard"
+readonly USER="aiops-dashboard"
+readonly GROUP="aiops-dashboard"
+readonly COMPOSE="$CONFIG_DIR/compose.yaml"
+readonly ENV_FILE="$CONFIG_DIR/dashboard.env"
+readonly BROKER_BIN="/usr/local/libexec/aiops-dashboard-broker"
+readonly BROKER_UNIT="/etc/systemd/system/aiops-dashboard-broker.service"
+readonly TELEMETRY_UNIT="/etc/systemd/system/aiops-dashboard-telemetry.service"
+readonly STACK_UNIT="/etc/systemd/system/aiops-dashboard.service"
+
+die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+info(){ printf '[INFO] %s\n' "$*"; }
+require_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root."; }
+require_command(){ command -v "$1" >/dev/null 2>&1 || die "Required command missing: $1"; }
+compose(){ docker compose --env-file "$ENV_FILE" -f "$COMPOSE" "$@"; }
+
+ensure_identity(){
+  getent group "$GROUP" >/dev/null || groupadd --system "$GROUP"
+  getent passwd "$USER" >/dev/null || useradd --system --gid "$GROUP" --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$USER"
+  install -d -o "$USER" -g "$GROUP" -m 0750 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+}
+
+validate_source(){
+  local source="$1"
+  [[ -d "$source" ]] || die "Dashboard source directory not found: $source"
+  local required; for required in package.json Dockerfile.web Dockerfile.api broker/main.go telemetry/collector.py apps/web/app/page.tsx apps/api/src/main.ts; do [[ -f "$source/$required" ]] || die "Dashboard source missing: $required"; done
+}
+
+install_source(){
+  local source="$1" backup
+  validate_source "$source"; backup="${APP_DIR}.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ ! -d "$APP_DIR" ]] || mv "$APP_DIR" "$backup"
+  install -d -o root -g root -m 0755 "$APP_DIR"; cp -a -- "$source"/. "$APP_DIR"/; chown -R root:root "$APP_DIR"; chmod -R o-w "$APP_DIR"
+  [[ ! -d "$backup" ]] || info "Previous dashboard source preserved: $backup"
+}
+
+build_broker(){
+  install -d -m 0755 "$(dirname "$BROKER_BIN")"
+  docker run --rm --network none -v "$APP_DIR/broker:/src:ro" -v "$(dirname "$BROKER_BIN"):/out" -w /src golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 go build -trimpath -ldflags='-s -w' -o /out/aiops-dashboard-broker .
+  chown root:root "$BROKER_BIN"; chmod 0755 "$BROKER_BIN"
+}
+
+write_config(){
+  local gid token
+  gid="$(getent group "$GROUP" | cut -d: -f3)"; [[ "$gid" =~ ^[0-9]+$ ]] || die "Unable to resolve dashboard group."
+  if [[ -f "$ENV_FILE" ]]; then token="$(awk -F= '$1=="AIOPS_DASHBOARD_TOKEN" {print $2}' "$ENV_FILE")"; else token="$(openssl rand -hex 32)"; fi
+  install -d -o root -g "$GROUP" -m 0750 "$CONFIG_DIR"
+  printf 'AIOPS_DASHBOARD_TOKEN=%s\nAIOPS_DASHBOARD_GID=%s\n' "$token" "$gid" >"$ENV_FILE"; chown root:"$GROUP" "$ENV_FILE"; chmod 0640 "$ENV_FILE"
+  cat >"$COMPOSE" <<EOF
+services:
+  api:
+    build:
+      context: $APP_DIR
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    environment:
+      AIOPS_API_PORT: "4601"
+      AIOPS_DASHBOARD_TOKEN: "\${AIOPS_DASHBOARD_TOKEN}"
+      AIOPS_BROKER_SOCKET: /run/aiops-dashboard/broker.sock
+      AIOPS_TELEMETRY_URL: http://127.0.0.1:9108
+      AIOPS_PROJECTS_ROOT: /srv/projects
+    network_mode: host
+    group_add:
+      - "\${AIOPS_DASHBOARD_GID}"
+    volumes:
+      - $RUN_DIR:$RUN_DIR
+      - /srv/projects:/srv/projects:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+  web:
+    build:
+      context: $APP_DIR
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    environment:
+      PORT: "4600"
+      HOSTNAME: 0.0.0.0
+      AIOPS_API_URL: http://127.0.0.1:4601
+    network_mode: host
+    depends_on: [api]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+EOF
+  chown root:"$GROUP" "$COMPOSE"; chmod 0640 "$COMPOSE"
+}
+
+write_units(){
+  cat >"$BROKER_UNIT" <<EOF
+[Unit]
+Description=SIMHA AiOps restricted operation broker
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=$GROUP
+Environment=AIOPS_BROKER_SOCKET=$RUN_DIR/broker.sock
+Environment=AIOPS_AUDIT_LOG=$LOG_DIR/audit.jsonl
+RuntimeDirectory=aiops-dashboard
+RuntimeDirectoryMode=0750
+ExecStart=$BROKER_BIN
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=$RUN_DIR $LOG_DIR /srv/projects /var/lib/docker /run/docker.sock
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat >"$TELEMETRY_UNIT" <<EOF
+[Unit]
+Description=SIMHA AiOps telemetry collector
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$GROUP
+Environment=AIOPS_TELEMETRY_HOST=127.0.0.1
+Environment=AIOPS_TELEMETRY_PORT=9108
+ExecStart=/usr/bin/python3 $APP_DIR/telemetry/collector.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat >"$STACK_UNIT" <<EOF
+[Unit]
+Description=SIMHA AiOps Dashboard containers
+Requires=docker.service aiops-dashboard-broker.service aiops-dashboard-telemetry.service
+After=docker.service aiops-dashboard-broker.service aiops-dashboard-telemetry.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker compose --env-file $ENV_FILE -f $COMPOSE up -d --build
+ExecStop=/usr/bin/docker compose --env-file $ENV_FILE -f $COMPOSE down
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$BROKER_UNIT" "$TELEMETRY_UNIT" "$STACK_UNIT"; systemctl daemon-reload
+}
+
+install_dashboard(){
+  require_root; require_command docker; require_command openssl; require_command python3
+  docker compose version >/dev/null; ensure_identity; install_source "${1:-}"; build_broker; write_config; write_units
+  systemctl enable --now aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service
+  verify; info "Dashboard installed on http://127.0.0.1:4600"
+}
+
+verify(){
+  require_root; [[ -x "$BROKER_BIN" && -f "$COMPOSE" && -f "$ENV_FILE" ]] || die "Dashboard installation is incomplete."
+  systemctl is-active --quiet aiops-dashboard-broker.service || die "Broker is inactive."
+  systemctl is-active --quiet aiops-dashboard-telemetry.service || die "Telemetry is inactive."
+  systemctl is-active --quiet aiops-dashboard.service || die "Dashboard stack is inactive."
+  [[ -S "$RUN_DIR/broker.sock" ]] || die "Broker socket missing."
+  curl -fsS http://127.0.0.1:9108/health >/dev/null || die "Telemetry health failed."
+  curl -fsS http://127.0.0.1:4601/api/health >/dev/null || die "API health failed."
+  curl -fsS http://127.0.0.1:4600/ >/dev/null || die "Web health failed."
+  info "AIOPS DASHBOARD: VERIFIED"
+}
+
+nginx_setup(){ require_root; local domain="${1:-}" email="${2:-}" user="${3:-aiopsadmin}"; [[ -n "$domain" && -n "$email" ]] || die "Usage: aiops-dashboard-manager nginx-setup DOMAIN EMAIL [AUTH_USER]"; [[ -x /usr/local/bin/nginx-manager ]] || die "nginx-manager is required."; /usr/local/bin/nginx-manager proxy-add "$domain" http://127.0.0.1:4600 "$user"; /usr/local/bin/nginx-manager ssl-issue "$domain" "$email"; /usr/local/bin/nginx-manager site-verify "$domain"; }
+backup(){ require_root; local out="${1:-/root/aiops-dashboard-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"; [[ "$out" == /* ]] || die "Backup path must be absolute."; tar -C / -czf "$out" etc/aiops-dashboard var/log/aiops-dashboard var/lib/aiops-dashboard; chmod 0600 "$out"; sha256sum "$out" >"$out.sha256"; chmod 0600 "$out.sha256"; echo "$out"; }
+restore(){
+  require_root; local archive="${1:-}" confirm="${2:-}" entry
+  [[ -f "$archive" ]] || die "Backup archive not found: $archive"; [[ "$confirm" == --yes ]] || die "Destructive restore requires: restore FILE --yes"
+  if [[ -f "$archive.sha256" ]]; then (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive.sha256")"); fi
+  while IFS= read -r entry; do
+    [[ "$entry" != /* && "/$entry/" != *"/../"* ]] || die "Unsafe backup entry: $entry"
+    case "$entry" in etc/aiops-dashboard|etc/aiops-dashboard/*|var/log/aiops-dashboard|var/log/aiops-dashboard/*|var/lib/aiops-dashboard|var/lib/aiops-dashboard/*) ;; *) die "Unexpected backup entry: $entry" ;; esac
+  done < <(tar -tzf "$archive")
+  systemctl stop aiops-dashboard.service aiops-dashboard-telemetry.service aiops-dashboard-broker.service || true
+  tar -xzf "$archive" -C / --no-same-owner
+  chown -R root:"$GROUP" "$CONFIG_DIR"; chown -R "$USER":"$GROUP" "$DATA_DIR" "$LOG_DIR"
+  systemctl start aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service; verify
+}
+status(){ systemctl --no-pager --full status aiops-dashboard.service aiops-dashboard-broker.service aiops-dashboard-telemetry.service 2>/dev/null | sed -n '1,80p' || true; compose ps 2>/dev/null || true; }
+logs(){ require_root; journalctl -u aiops-dashboard.service -u aiops-dashboard-broker.service -u aiops-dashboard-telemetry.service -n "${1:-200}" --no-pager; compose logs --tail "${1:-200}" 2>/dev/null || true; }
+help(){ cat <<EOF
+aiops-dashboard-manager $MANAGER_VERSION
+Lifecycle: install DASHBOARD_SOURCE_DIR | start | stop | restart | status | verify | logs [N]
+Edge: nginx-setup DOMAIN EMAIL [AUTH_USER] | nginx-remove DOMAIN
+Protection: backup [ABSOLUTE_FILE] | restore FILE --yes
+Inspection: version | help
+
+The Next.js/NestJS containers remain unprivileged and loopback-only. Mutations
+cross a protected Unix socket to a Go broker with a fixed operation allowlist.
+Python telemetry remains loopback-only. No component exposes a shell or mounts
+the Docker socket into a web container.
+EOF
+}
+
+case "${1:-help}" in
+  install) install_dashboard "${2:-}" ;; start) require_root; systemctl start aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service ;; stop) require_root; systemctl stop aiops-dashboard.service aiops-dashboard-telemetry.service aiops-dashboard-broker.service ;; restart) require_root; systemctl restart aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service ;;
+  status) status ;; verify) verify ;; logs) logs "${2:-200}" ;; nginx-setup) nginx_setup "${2:-}" "${3:-}" "${4:-aiopsadmin}" ;; nginx-remove) require_root; /usr/local/bin/nginx-manager proxy-remove "${2:-}" ;; backup) backup "${2:-}" ;; restore) restore "${2:-}" "${3:-}" ;;
+  version) echo "aiops-dashboard-manager $MANAGER_VERSION" ;; help|-h|--help) help ;; *) help >&2; exit 2 ;;
+esac

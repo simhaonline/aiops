@@ -28,7 +28,7 @@ This command:
 1. requires Ubuntu 24.04 LTS for install mode;
 2. resolves `main` (or the requested tag) to one immutable Git commit before downloading the release payload;
 3. downloads `SHA256SUMS.txt` from that exact commit;
-4. downloads all **21** maintained manager scripts from the same commit;
+4. downloads all **22** maintained manager scripts from the same commit;
 5. verifies every downloaded manager against the checksum manifest;
 6. runs Bash syntax, `help`, and version checks;
 7. backs up existing canonical manager commands;
@@ -81,6 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh \
 | `llmrouter-manager` | 1.0.0 | LMRouter CLI/API lifecycle | **requires `nvm-manager`** |
 | `project-manager` | 1.0.0 | Isolated per-project development, backup and restore | **requires Docker Compose** |
 | `collection-manager` | 1.0.0 | Isolated Scrapling collection policy, crawl, UI and recovery | **requires `project-manager` and Docker** |
+| `aiops-dashboard-manager` | 1.0.0 | Next.js/NestJS operations UI, Go broker and Python telemetry | **requires Docker and dashboard source** |
 | `manager-suite` | 1.0.0 | Cross-manager inventory/status/verification | none |
 
 Runtime/upstream application versions are independent from the manager suite version. For example, `nvm-manager 1.0.0` can manage a newer Node release without changing the manager's own version.
@@ -121,7 +122,8 @@ Phase 5 - AI gateways/routing
 Phase 6 - Isolated development and health gate
  19. project-manager
  20. collection-manager (optional)
- 21. manager-suite
+ 21. aiops-dashboard-manager (optional)
+ 22. manager-suite
 ```
 
 Display the same sequence from the installed suite:
@@ -216,6 +218,24 @@ ephemeral, capability-free, read-only, resource-limited and uses AI-targeted
 extraction. The dashboard binds only to its automatically allocated loopback
 port; Nginx supplies Basic Auth and TLS. Collection backup and restore are
 separate so large datasets need not be included in every project backup.
+
+## AiOps operations dashboard
+
+The optional dashboard is a four-process control plane with a responsive,
+accessible light/dark interface:
+
+```bash
+sudo aiops-dashboard-manager install /path/to/aiops/dashboard
+sudo aiops-dashboard-manager verify
+sudo aiops-dashboard-manager nginx-setup ops.example.com admin@example.com aiopsadmin
+```
+
+Next.js serves the interface, NestJS provides validated APIs, Python exports
+host telemetry, and a small Go broker owns the only privileged boundary. The
+web containers do not mount the Docker socket and cannot execute arbitrary
+commands. The first UI release is observability-first; its mutation API accepts
+only seven explicit operations, validates direct `/srv/projects` targets, times
+out execution, truncates output, and writes a JSON audit record.
 
 ```bash
 project-manager backup /srv/projects/example /srv/backups/example.tar.gz
@@ -401,7 +421,8 @@ The maintained Miniconda manager:
 
 ```text
 .
-├── scripts/                 # 21 maintained executable managers
+├── scripts/                 # 22 maintained executable managers
+├── dashboard/               # Next.js, NestJS, Go broker, Python telemetry
 ├── qa/                      # release validation/regression checks
 ├── README.md
 ├── ADMIN-GUIDE.md
@@ -427,7 +448,7 @@ bash qa/validate-release.sh
 
 The release gate checks:
 
-- exactly 21 maintained manager scripts;
+- exactly 22 maintained manager scripts;
 - all maintained managers are version `1.0.0`;
 - Bash syntax;
 - manager `help` entry points;
