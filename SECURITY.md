@@ -42,6 +42,11 @@ Checksums protect against accidental corruption or inconsistent payloads. They a
 
 ## Runtime exposure
 
+The platform-management UI currently contains mock-safe usage and billing
+states. It must not be presented as a live billing or identity system until
+tenant authentication, authorization, payment-provider webhooks, API-key
+hashing/rotation, and usage reconciliation are connected to the SaaS API.
+
 Keep application backends on loopback whenever supported. Use `nginx-manager` as the intended public TLS edge.
 
 ## Repository scope

@@ -328,6 +328,23 @@ conversation persistence, streaming inference, media workers, and workflow
 execution remain subsequent backend layers. See
 [ARCHITECTURE-REPORT.md](ARCHITECTURE-REPORT.md).
 
+### Platform management portal
+
+The platform portal is available at `/usage` (and the management routes listed
+below) with its own responsive sidebar, organization switcher, usage/balance
+cards, GMT+4 context, filters, export feedback, light/dark theme, billing
+links, and safe empty states:
+
+`/home`, `/usage`, `/api-keys`, `/playground`, `/models`, `/logs`, `/batches`,
+`/storage`, `/webhooks`, `/billing`, `/top-up`, `/invoices`, `/users`,
+`/teams`, `/projects`, `/audit-logs`, `/security`, `/settings`, `/docs`.
+
+The Usage view is currently mock-backed and intentionally does not claim live
+billing, authentication, payment processing, or API-key persistence. Those
+features connect to the tenant-aware PostgreSQL SaaS layer as they are
+implemented. Marketing claims about quantum computing, compliance, or measured
+performance must not be published without verified product evidence.
+
 ```bash
 project-manager backup /srv/projects/example /srv/backups/example.tar.gz
 project-manager restore /srv/backups/example.tar.gz /srv/projects/example-restored

@@ -241,6 +241,11 @@ processing, and workflow execution are backend capabilities that must be
 enabled as they are delivered. Never paste secrets into search, names, or
 operation arguments.
 
+The platform portal Usage view includes balance, cost, token/request metrics,
+GMT+4 filters, export feedback, and request-history states. These values are
+currently demonstration data; do not use them for billing or operational
+reconciliation until the authenticated SaaS data services are enabled.
+
 ## 10. Goose
 
 Enable and install Goose inside this project only:

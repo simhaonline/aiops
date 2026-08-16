@@ -4,6 +4,21 @@
 
 All maintained executable manager scripts now use manager version `1.0.0`.
 
+### Platform management portal update
+
+- Added a responsive SIMHA Online platform-management shell with organization
+  switcher, grouped navigation, user profile area, theme toggle, and Studio
+  handoff.
+- Added the `/usage` view with GMT+4 context, balance/cost cards, balance alert
+  status, time/project/API/service filters, export feedback, usage metrics,
+  service breakdown, request history, and responsive empty states.
+- Added route coverage for API keys, playground, models, logs, batches, storage,
+  webhooks, billing, top-up, invoices, users, teams, projects, audit logs,
+  security, settings, and documentation.
+- Documented that these management views are mock-backed until authenticated
+  tenant APIs, billing providers, API-key persistence, and usage repositories
+  are connected.
+
 ### Installer
 
 - Rebuilt `install.sh` as the complete 23-command suite bootstrap.

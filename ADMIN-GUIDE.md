@@ -395,6 +395,12 @@ storage/streaming, document and media workers, and workflow execution must be
 enabled as separately implemented backend layers. See
 [ARCHITECTURE-REPORT.md](ARCHITECTURE-REPORT.md).
 
+The platform-management route `/usage` is also available from the dashboard
+source. It currently displays mock-safe balance, usage, billing, filter, and
+empty-state views. Do not treat displayed balances or invoices as authoritative
+until authentication, tenant context, payment integration, and usage
+repositories are connected to the SaaS API.
+
 Operational checks:
 
 ```bash

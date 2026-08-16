@@ -29,6 +29,20 @@ schema and migration guidance are in [`database/`](database/). Set
 `AIOPS_DATABASE_URL` for persistence; local/read-only installations may leave
 it unset.
 
+## Platform portal
+
+The route `/usage` provides the first platform-management slice: organization
+switching, navigation, balance and cost summaries, GMT+4 usage filters, export
+feedback, service breakdowns, request-history empty states, and light/dark
+mode. The same shell resolves `/home`, `/api-keys`, `/playground`, `/models`,
+`/logs`, `/batches`, `/storage`, `/webhooks`, `/billing`, `/top-up`,
+`/invoices`, `/users`, `/teams`, `/projects`, `/audit-logs`, `/security`,
+`/settings`, and `/docs` to safe management views.
+
+These views are currently mock-backed. Authentication, live usage aggregation,
+payment providers, API-key storage, and billing actions must be connected to
+the authenticated SaaS API before production use.
+
 ## Development
 
 ```bash

@@ -46,15 +46,16 @@ Forgejo optionally uses PostgreSQL. The core suite has no central application da
 | `scripts/litellm-manager` | LiteLLM lifecycle, provider keys, verified-free model synchronization |
 | `scripts/ollama-manager` | Ollama Cloud policy and approved Cloud model catalog |
 | `scripts/aiops-dashboard-manager` | Dashboard deployment, systemd, Docker, broker, telemetry, backup, edge |
-| `dashboard/apps/web` | Next.js/React Studio interface and proxy routes |
-| `dashboard/apps/api` | NestJS controllers and platform service |
+| `dashboard/apps/web` | Next.js/React Studio interface, platform-management routes, theme system, and proxy routes |
+| `dashboard/apps/api` | NestJS controllers, platform service, and optional PostgreSQL pool/health boundary |
+| `dashboard/database` | PostgreSQL/pgvector/TimescaleDB migration and tenant RLS policy |
 | `dashboard/broker` | Go Unix-socket privileged operation broker |
 | `dashboard/telemetry` | Python telemetry collector |
 | `qa/` | Release, security, regression, and manager tests |
 
 ## 4. Explicit out-of-scope behavior
 
-The repository does not provide arbitrary shell execution, a central user/conversation database, built-in SSO/OAuth/SCIM, automatic installation of discovered skills/agents/MCP/plugins, unrestricted crawling, browser-side provider secrets, host Docker socket access from web/API containers, automatic installation of every runtime, provider billing management, or a complete multimodal inference/workflow execution backend. Public authentication is handled at the Nginx edge; the internal operations API additionally requires `AIOPS_DASHBOARD_TOKEN`.
+The repository does not provide arbitrary shell execution, built-in SSO/OAuth/SCIM, automatic installation of discovered skills/agents/MCP/plugins, unrestricted crawling, browser-side provider secrets, host Docker socket access from web/API containers, automatic installation of every runtime, provider billing management, or a complete multimodal inference/workflow execution backend. The platform portal route shell and Usage view are currently mock-backed; live identity, API-key persistence, payment processing, usage reconciliation, and tenant request middleware remain SaaS delivery work. Public authentication is handled at the Nginx edge; the internal operations API additionally requires `AIOPS_DASHBOARD_TOKEN`.
 
 ## 5. Core API request lifecycle
 
@@ -200,13 +201,14 @@ Projects use:
     └── backups/
 ```
 
-The dashboard has overview and capability JSON models, but no persistent conversation store. LiteLLM stores model configuration under `/etc/litellm/config.yaml`; Ollama Cloud policy is under `/etc/ollama-cloud/ollama.env` and its systemd override.
+The dashboard has overview and capability JSON models. The platform route shell has mock-safe usage/billing state, while the optional PostgreSQL boundary is defined in `dashboard/database/migrations/001_initial.sql`; it is not yet the live repository for every UI view. LiteLLM stores model configuration under `/etc/litellm/config.yaml`; Ollama Cloud policy is under `/etc/ollama-cloud/ollama.env` and its systemd override.
 
 ### Gotchas
 
 - Bootstrap installs manager commands, not every runtime.
 - `aiops` and `manager-suite` duplicate manager registries and both need updates when a manager changes.
 - The Studio composer is currently a capability/UI foundation, not a complete persisted streaming chat backend.
+- The platform `/usage` page is a responsive management UI foundation; balance and usage values are demonstration data until authenticated SaaS repositories are connected.
 - `PlatformService` falls back to an unavailable telemetry response when telemetry cannot be reached.
 - `.aiops/project.env` is required for dashboard project discovery.
 - Provider APIs can change model metadata formats; model filters must remain conservative.

@@ -43,8 +43,8 @@ request. Missing tenant context intentionally returns no rows.
 
 ## Delivery phases
 
-1. Foundation: migration, database health, tenant context middleware, and
-   repository interfaces.
+1. Foundation: migration, database health, platform-management UI shell,
+   tenant context middleware, and repository interfaces.
 2. Persistence: projects, conversations, registry items, and audit events move
    behind repositories with transaction-scoped tenant IDs.
 3. Workers: queue-backed crawl, embedding, media, and translation workers with

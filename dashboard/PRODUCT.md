@@ -8,6 +8,16 @@ Studio UI or application framework.
 
 ## Product surfaces
 
+### Platform management portal
+
+The platform portal is the organization and developer control plane. Its first
+implemented view is `/usage`, with balance, cost, token/request metrics,
+GMT+4-aware filters, export feedback, service breakdowns, request history, and
+responsive light/dark navigation. Management routes cover API keys, models,
+logs, billing, invoices, users, teams, projects, security, settings, and docs.
+The current route shell uses safe mock/empty states until authenticated API,
+billing, and usage repositories are connected.
+
 | Surface | Primary capability |
 | --- | --- |
 | Studio | Multimodal conversations and creation with project context |
