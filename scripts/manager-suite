@@ -23,6 +23,7 @@ readonly MANAGERS=(
   litellm-manager
   llmrouter-manager
   project-manager
+  collection-manager
 )
 
 say(){ printf '%-22s %s\n' "$1" "$2"; }
@@ -47,7 +48,7 @@ runtime_present() {
     freebuff-manager) [[ -x /root/.nvm/default-bin/freebuff ]] ;;
     litellm-manager) [[ -x /opt/litellm/current/bin/litellm ]] ;;
     llmrouter-manager) [[ -x /root/.nvm/default-bin/lmrouter ]] ;;
-    project-manager) command -v docker >/dev/null 2>&1 ;;
+    project-manager|collection-manager) command -v docker >/dev/null 2>&1 ;;
     *) return 1 ;;
   esac
 }
@@ -147,7 +148,8 @@ Phase 5 - AI gateways / routing
 
 Phase 6 - Suite health gate
  19. project-manager (create isolated development environments as needed)
- 20. manager-suite
+ 20. collection-manager (isolated Scrapling collections; optional)
+ 21. manager-suite
 
 The one-line bootstrap installs manager SCRIPT files only. Runtime installation
 remains explicit; run '<manager> install' only for the components you need.
@@ -218,6 +220,10 @@ llmrouter-manager
 project-manager
   REQUIRES Docker Compose. Creates isolated per-project development containers;
   does not share host agent configuration, skills, plugins, MCP state or HOME.
+
+collection-manager
+  REQUIRES project-manager and Docker. Runs pinned Scrapling workers with
+  per-project collection policy, data, dashboard, edge, backup and restore.
 
 manager-suite
   No runtime dependency; discovers managers and coordinates health reporting.

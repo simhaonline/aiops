@@ -110,6 +110,33 @@ project-manager secret-set /srv/projects/example mulerouter
 The key is injected through `.aiops/secrets/runtime.env`; it is never added to
 the image or `project.env`.
 
+## AI asset management
+
+`project-manager` maintains three independent layers:
+
+- `AGENTS.md` provides version-controlled project instructions.
+- Skills and plugins are copied under the isolated `CODEX_HOME` and recorded in
+  `.aiops/ai/assets.lock` with deterministic tree checksums.
+- MCP server definitions live in `.aiops/ai/mcp.json`; inline secret-like
+  arguments are rejected and definitions are disabled until explicitly enabled.
+
+Use `asset-verify` and `ai-audit` after every asset change and before backup or
+deployment. Imported assets cannot contain symbolic links, preventing an asset
+from reaching outside its project-local directory through the copied tree.
+
+## Collection boundary
+
+`collection-manager` stores policy under `.aiops/collections/config` and
+collected content under `.aiops/collections/data`. Scrapling runs in an
+ephemeral, read-only, capability-free container with CPU, memory and process
+limits. Each collection records one HTTPS start URL and exact allowed host.
+
+The lightweight collection index is a separate unprivileged sidecar on a
+project-specific loopback port in `19080-19999`. Remote access requires the
+managed Nginx Basic-Auth/TLS edge. High-risk deployments should additionally
+enforce DNS-aware egress policy because application validation alone cannot
+fully prevent DNS rebinding or cross-domain redirects.
+
 ## Backup and restore
 
 Backups contain the complete project source and its isolated home/configuration

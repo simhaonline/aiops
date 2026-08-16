@@ -67,7 +67,15 @@ project-manager init /srv/projects/example example
 project-manager up /srv/projects/example
 ```
 
-## Step 7 - Final health check
+## Step 7 - Optional isolated collections
+
+```bash
+collection-manager init /srv/projects/example documentation https://example.com/docs
+collection-manager ui-enable /srv/projects/example
+collection-manager crawl /srv/projects/example documentation
+```
+
+## Step 8 - Final health check
 
 ```bash
 manager-suite versions

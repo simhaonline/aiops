@@ -181,7 +181,46 @@ sudo project-manager edge-remove /srv/projects/example code-server
 project-manager feature-disable /srv/projects/example code-server
 ```
 
-## 7. Goose
+## 7. Skills, plugins and MCP servers
+
+Ask an administrator or project owner to approve each asset source before
+importing it:
+
+```bash
+project-manager asset-add /srv/projects/example skill review-workflow ./review-workflow
+project-manager asset-add /srv/projects/example plugin team-tools ./team-tools
+project-manager assets /srv/projects/example all
+project-manager asset-verify /srv/projects/example
+```
+
+Register an MCP command without embedding tokens or passwords:
+
+```bash
+project-manager mcp /srv/projects/example add repository-mcp repository-mcp --stdio
+project-manager mcp /srv/projects/example enable repository-mcp
+project-manager mcp /srv/projects/example test repository-mcp
+project-manager ai-audit /srv/projects/example
+```
+
+`AGENTS.md` contains project instructions and may be committed. The isolated
+home, secrets, installed asset copies and runtime state must remain uncommitted.
+
+## 8. Collections
+
+For an authorized public HTTPS source:
+
+```bash
+collection-manager init /srv/projects/example docs https://example.com/docs
+collection-manager crawl /srv/projects/example docs
+collection-manager list /srv/projects/example
+collection-manager verify /srv/projects/example
+```
+
+Use only sources you are authorized to collect. Do not collect personal,
+sensitive, authenticated or paywalled content. The administrator-provided
+dashboard URL is read-only and protected by the Nginx edge.
+
+## 9. Goose
 
 Enable and install Goose inside this project only:
 

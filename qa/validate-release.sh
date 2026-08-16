@@ -7,7 +7,7 @@ umask 027
 cd "$(dirname "$0")/.."
 
 readonly RELEASE_VERSION="1.0.0"
-readonly EXPECTED_MANAGERS=20
+readonly EXPECTED_MANAGERS=21
 
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 pass(){ printf '[PASS] %s\n' "$*"; }
@@ -35,7 +35,7 @@ pass "Required release files"
 manager_count="$(find scripts -maxdepth 1 -type f | wc -l)"
 [[ "$manager_count" -eq "$EXPECTED_MANAGERS" ]] || \
   die "Expected $EXPECTED_MANAGERS maintained manager scripts; found $manager_count."
-pass "20 maintained manager scripts"
+pass "21 maintained manager scripts"
 
 # Shell syntax: maintained managers, bootstrap and QA.
 for f in install.sh install-canonical-managers.sh scripts/* qa/*.sh; do
@@ -86,7 +86,7 @@ names = [
 "system-manager","docker-manager","forgejo-manager","forgejo-runner-manager","gvm-manager","miniconda-manager","nvm-manager",
 "ollama-manager","nginx-manager","wireguard-manager","harness-manager","hermes-manager",
 "codex-manager","claude-manager","opencode-manager","freebuff-manager","litellm-manager",
-"llmrouter-manager","project-manager","manager-suite",
+"llmrouter-manager","project-manager","collection-manager","manager-suite",
 ]
 for n in names:
     if order.count(n) != 1:
@@ -120,6 +120,11 @@ grep -Fq '127.0.0.1:4096' scripts/opencode-manager || die "OpenCode loopback pol
 grep -Fq 'nginx-setup DOMAIN EMAIL [AUTH_USER]' scripts/codex-manager || die "Codex authenticated WebSocket edge integration missing."
 grep -Fq 'nginx-setup DOMAIN EMAIL' scripts/opencode-manager || die "OpenCode edge integration missing."
 grep -Fq 'edge-add PATH NAME DOMAIN EMAIL [AUTH_USER]' scripts/project-manager || die "Project UI edge lifecycle missing."
+grep -Fq 'assets.lock' scripts/project-manager || die "Project AI asset locking missing."
+grep -Fq 'allow_mcp_inline_secrets: false' scripts/project-manager || die "Project MCP secret policy missing."
+grep -Fq 'ghcr.io/d4vinci/scrapling@sha256:' scripts/collection-manager || die "Scrapling digest pin missing."
+grep -Fq 'robots.txt disallows this collection URL' scripts/collection-manager || die "Collection robots policy missing."
+grep -Fq 'schedule-add PROJECT NAME ONCALENDAR' scripts/collection-manager || die "Collection scheduling missing."
 pass "Core security policy gates"
 
 # Normal canonical source check validates the maintained managers.
@@ -139,7 +144,7 @@ import hashlib, json
 root=Path(".")
 m=json.loads((root/"MANIFEST.json").read_text())
 assert m["release"]=="1.0.0"
-assert len(m["managers"])==20
+assert len(m["managers"])==21
 
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -172,6 +177,9 @@ pass "Harness Ollama model-discovery regression"
 
 qa/project-manager-regression-test.sh >/dev/null
 pass "Project isolation backup/restore regression"
+
+qa/collection-manager-regression-test.sh >/dev/null
+pass "Scrapling collection policy/crawl/UI/backup/restore regression"
 
 qa/forgejo-isolation-regression-test.sh >/dev/null
 pass "Forgejo and runner trust-zone regression"

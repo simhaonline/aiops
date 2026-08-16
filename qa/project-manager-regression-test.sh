@@ -39,6 +39,22 @@ grep -Fq 'source: ./.aiops/home' "$TMP/source/.aiops/compose.yaml"
 ! grep -Fq '/var/run/docker.sock' "$TMP/source/.aiops/compose.yaml"
 ! grep -Eq '^AIOPS_UID=0$|^AIOPS_GID=0$' "$TMP/source/.aiops/project.env"
 grep -Eq '^AIOPS_CODE_SERVER_PORT=18[0-9]{3}$' "$TMP/source/.aiops/project.env"
+grep -Eq '^AIOPS_COLLECTION_PORT=19[0-9]{3}$' "$TMP/source/.aiops/project.env"
+test -f "$TMP/source/.aiops/ai/policy.yaml"
+test -f "$TMP/source/.aiops/ai/mcp.json"
+
+mkdir -p "$TMP/skill" "$TMP/plugin/.codex-plugin"
+printf '%s\n' '---' 'name: test-skill' 'description: regression fixture' '---' '# Test' >"$TMP/skill/SKILL.md"
+printf '{"name":"test-plugin","version":"1.0.0"}\n' >"$TMP/plugin/.codex-plugin/plugin.json"
+PATH="$TMP/bin:$PATH" bash "$SCRIPT" asset-add "$TMP/source" skill test-skill "$TMP/skill" >/dev/null
+PATH="$TMP/bin:$PATH" bash "$SCRIPT" asset-add "$TMP/source" plugin test-plugin "$TMP/plugin" >/dev/null
+PATH="$TMP/bin:$PATH" bash "$SCRIPT" asset-verify "$TMP/source" >/dev/null
+PATH="$TMP/bin:$PATH" bash "$SCRIPT" mcp "$TMP/source" add test-mcp docker --version >/dev/null
+PATH="$TMP/bin:$PATH" bash "$SCRIPT" mcp "$TMP/source" enable test-mcp >/dev/null
+grep -Fq '[mcp_servers.test-mcp]' "$TMP/source/.aiops/home/.codex/config.toml"
+grep -Fq 'command = "docker"' "$TMP/source/.aiops/home/.codex/config.toml"
+PATH="$TMP/bin:$PATH" bash "$SCRIPT" mcp "$TMP/source" test test-mcp >/dev/null
+PATH="$TMP/bin:$PATH" bash "$SCRIPT" ai-audit "$TMP/source" >/dev/null
 
 printf 'project-only-skill\n' >"$TMP/source/.aiops/home/.codex/skills/identity.txt"
 printf 'project source\n' >"$TMP/source/example.txt"
@@ -72,5 +88,6 @@ cmp "$TMP/source/example.txt" "$TMP/restored/example.txt"
 cmp "$TMP/source/.aiops/home/.codex/skills/identity.txt" \
   "$TMP/restored/.aiops/home/.codex/skills/identity.txt"
 cmp "$TMP/source/.aiops/secrets/runtime.env" "$TMP/restored/.aiops/secrets/runtime.env"
+cmp "$TMP/source/.aiops/ai/assets.lock" "$TMP/restored/.aiops/ai/assets.lock"
 
 echo 'PROJECT-MANAGER ISOLATION/BACKUP/RESTORE REGRESSION: PASS'

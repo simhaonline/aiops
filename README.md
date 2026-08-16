@@ -28,7 +28,7 @@ This command:
 1. requires Ubuntu 24.04 LTS for install mode;
 2. resolves `main` (or the requested tag) to one immutable Git commit before downloading the release payload;
 3. downloads `SHA256SUMS.txt` from that exact commit;
-4. downloads all **20** maintained manager scripts from the same commit;
+4. downloads all **21** maintained manager scripts from the same commit;
 5. verifies every downloaded manager against the checksum manifest;
 6. runs Bash syntax, `help`, and version checks;
 7. backs up existing canonical manager commands;
@@ -80,6 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh \
 | `litellm-manager` | 1.0.0 | LiteLLM Proxy lifecycle | Python/venv/build baseline |
 | `llmrouter-manager` | 1.0.0 | LMRouter CLI/API lifecycle | **requires `nvm-manager`** |
 | `project-manager` | 1.0.0 | Isolated per-project development, backup and restore | **requires Docker Compose** |
+| `collection-manager` | 1.0.0 | Isolated Scrapling collection policy, crawl, UI and recovery | **requires `project-manager` and Docker** |
 | `manager-suite` | 1.0.0 | Cross-manager inventory/status/verification | none |
 
 Runtime/upstream application versions are independent from the manager suite version. For example, `nvm-manager 1.0.0` can manage a newer Node release without changing the manager's own version.
@@ -119,7 +120,8 @@ Phase 5 - AI gateways/routing
 
 Phase 6 - Isolated development and health gate
  19. project-manager
- 20. manager-suite
+ 20. collection-manager (optional)
+ 21. manager-suite
 ```
 
 Display the same sequence from the installed suite:
@@ -175,6 +177,45 @@ upstream. Remove it before disabling code-server or destroying the project:
 ```bash
 sudo project-manager edge-remove /srv/projects/example code-server
 ```
+
+Project AI assets are explicit, local and auditable:
+
+```bash
+project-manager asset-add /srv/projects/example skill review-workflow ./skill-source
+project-manager asset-add /srv/projects/example plugin team-tools ./plugin-source
+project-manager mcp /srv/projects/example add repository-mcp repository-mcp --stdio
+project-manager mcp /srv/projects/example enable repository-mcp
+project-manager asset-verify /srv/projects/example
+project-manager ai-audit /srv/projects/example
+```
+
+Skills require `SKILL.md`; plugins require `.codex-plugin/plugin.json`. Installed
+bytes are copied into the isolated `CODEX_HOME` and locked by checksum. MCP
+definitions reject inline credentials; inject secrets through the protected
+project runtime secret file.
+
+## Isolated collection management
+
+`collection-manager` uses a version-pinned Scrapling worker to collect only an
+explicit HTTPS target under its recorded domain allowlist:
+
+```bash
+collection-manager init /srv/projects/example docs https://example.com/docs
+collection-manager crawl /srv/projects/example docs
+collection-manager verify /srv/projects/example
+sudo collection-manager install
+sudo collection-manager schedule-add /srv/projects/example docs daily
+collection-manager ui-enable /srv/projects/example
+project-manager up /srv/projects/example
+sudo collection-manager edge-add /srv/projects/example \
+  collections.example.com admin@example.com collectionadmin
+```
+
+Collected Markdown and SHA-256 sidecars remain under the project. The worker is
+ephemeral, capability-free, read-only, resource-limited and uses AI-targeted
+extraction. The dashboard binds only to its automatically allocated loopback
+port; Nginx supplies Basic Auth and TLS. Collection backup and restore are
+separate so large datasets need not be included in every project backup.
 
 ```bash
 project-manager backup /srv/projects/example /srv/backups/example.tar.gz
@@ -360,7 +401,7 @@ The maintained Miniconda manager:
 
 ```text
 .
-├── scripts/                 # 20 maintained executable managers
+├── scripts/                 # 21 maintained executable managers
 ├── qa/                      # release validation/regression checks
 ├── README.md
 ├── ADMIN-GUIDE.md
@@ -386,7 +427,7 @@ bash qa/validate-release.sh
 
 The release gate checks:
 
-- exactly 20 maintained manager scripts;
+- exactly 21 maintained manager scripts;
 - all maintained managers are version `1.0.0`;
 - Bash syntax;
 - manager `help` entry points;

@@ -10,6 +10,7 @@ readonly ENV_REL="${MANAGED_DIR}/project.env"
 readonly DOCKERFILE_REL="${MANAGED_DIR}/container/Dockerfile"
 readonly FEATURE_REL="${MANAGED_DIR}/features"
 readonly SECRET_REL="${MANAGED_DIR}/secrets"
+readonly AI_REL="${MANAGED_DIR}/ai"
 readonly NGINX_MANAGER="${AIOPS_NGINX_MANAGER:-/usr/local/bin/nginx-manager}"
 
 die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
@@ -79,18 +80,36 @@ allocate_code_server_port(){
   die "No free project UI port is available in 18080-18999."
 }
 
+allocate_collection_port(){
+  local root="$1" parent candidate used
+  parent="$(dirname "$root")"
+  for candidate in $(seq 19080 19999); do
+    used="$(find "$parent" -mindepth 2 -maxdepth 3 -type f -path '*/.aiops/project.env' -exec \
+      awk -F= '$1=="AIOPS_COLLECTION_PORT" {print $2}' {} + 2>/dev/null || true)"
+    grep -Fxq "$candidate" <<<"$used" && continue
+    if command -v ss >/dev/null 2>&1 && \
+      ss -H -lnt 2>/dev/null | awk -v suffix=":${candidate}" '$4 ~ suffix"$" {found=1} END {exit !found}'; then
+      continue
+    fi
+    printf '%s\n' "$candidate"; return 0
+  done
+  die "No free collection UI port is available in 19080-19999."
+}
+
 write_templates(){
-  local root="$1" name="$2" uid gid code_server_port
+  local root="$1" name="$2" uid gid code_server_port collection_port
   uid="${AIOPS_PROJECT_UID:-$(id -u)}"; gid="${AIOPS_PROJECT_GID:-$(id -g)}"
   [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || die "Project UID/GID must be numeric."
   if [[ "$uid" == 0 ]]; then uid=10000; fi
   if [[ "$gid" == 0 ]]; then gid=10000; fi
   code_server_port="$(allocate_code_server_port "$root")"
+  collection_port="$(allocate_collection_port "$root")"
   install -d -m 0700 \
     "$root/$MANAGED_DIR/container" \
     "$root/$MANAGED_DIR/home/.codex/skills" \
     "$root/$MANAGED_DIR/home/.codex/plugins" \
     "$root/$MANAGED_DIR/home/.config" \
+    "$root/$AI_REL" \
     "$root/$FEATURE_REL" \
     "$root/$SECRET_REL" \
     "$root/$MANAGED_DIR/backups"
@@ -102,6 +121,7 @@ AIOPS_GID=$gid
 AIOPS_BASE_IMAGE=ubuntu:24.04
 AIOPS_PACKAGES=ca-certificates curl git jq build-essential python3 python3-venv python3-pip nodejs npm golang-go
 AIOPS_CODE_SERVER_PORT=$code_server_port
+AIOPS_COLLECTION_PORT=$collection_port
 EOF
 
   cat >"$root/$DOCKERFILE_REL" <<'EOF'
@@ -192,7 +212,156 @@ EOF
   chmod 0600 "$root/$ENV_REL"
   : >"$root/$SECRET_REL/runtime.env"
   chmod 0600 "$root/$SECRET_REL/runtime.env"
+  cat >"$root/$AI_REL/policy.yaml" <<'EOF'
+schema: 1
+scope: project
+allow_host_config: false
+allow_host_docker_socket: false
+require_asset_checksums: true
+allow_mcp_inline_secrets: false
+EOF
+  printf '{"schema":1,"servers":{}}\n' >"$root/$AI_REL/mcp.json"
+  : >"$root/$AI_REL/assets.lock"
+  chmod 0644 "$root/$AI_REL/policy.yaml" "$root/$AI_REL/mcp.json" "$root/$AI_REL/assets.lock"
   chmod 0644 "$root/$COMPOSE_REL" "$root/$DOCKERFILE_REL"
+}
+
+validate_asset_name(){
+  [[ "$1" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || die "Asset name must be lowercase and filesystem-safe."
+}
+
+asset_hash(){
+  local dir="$1"
+  (cd -- "$dir" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+}
+
+asset_lock_set(){
+  local root="$1" kind="$2" name="$3" digest="$4" source="$5" lock tmp
+  lock="$root/$AI_REL/assets.lock"; tmp="${lock}.tmp"
+  awk -F '\t' -v k="$kind" -v n="$name" '!($1==k && $2==n)' "$lock" >"$tmp"
+  printf '%s\t%s\t%s\t%s\n' "$kind" "$name" "$digest" "$source" >>"$tmp"
+  sort -o "$tmp" "$tmp"; mv "$tmp" "$lock"; chmod 0644 "$lock"
+}
+
+asset_add(){
+  local root kind name source destination marker digest
+  root="$(project_root "${1:-$PWD}")"; kind="${2:-}"; name="${3:-}"; source="${4:-}"
+  validate_asset_name "$name"; [[ -d "$source" ]] || die "Asset source directory not found: $source"
+  [[ -z "$(find "$source" -type l -print -quit)" ]] || die "Asset sources may not contain symbolic links."
+  case "$kind" in
+    skill) destination="$root/$MANAGED_DIR/home/.codex/skills/$name"; marker=SKILL.md ;;
+    plugin) destination="$root/$MANAGED_DIR/home/.codex/plugins/$name"; marker=.codex-plugin/plugin.json ;;
+    *) die "Asset type must be skill or plugin." ;;
+  esac
+  [[ -f "$source/$marker" ]] || die "$kind source is missing $marker"
+  if [[ "$kind" == skill ]]; then
+    grep -Eq '^name:[[:space:]]*[^[:space:]]' "$source/SKILL.md" || die "SKILL.md is missing frontmatter name."
+    grep -Eq '^description:[[:space:]]*[^[:space:]]' "$source/SKILL.md" || die "SKILL.md is missing frontmatter description."
+  else
+    python3 -m json.tool "$source/.codex-plugin/plugin.json" >/dev/null || die "Plugin manifest is not valid JSON."
+  fi
+  [[ ! -e "$destination" ]] || die "$kind already exists: $name"
+  install -d -m 0700 "$(dirname "$destination")"; cp -a -- "$source" "$destination"
+  digest="$(asset_hash "$destination")"; asset_lock_set "$root" "$kind" "$name" "$digest" "$(cd "$source" && pwd -P)"
+  info "Added and checksum-locked $kind: $name"
+}
+
+asset_remove(){
+  local root kind name destination lock tmp
+  root="$(project_root "${1:-$PWD}")"; kind="${2:-}"; name="${3:-}"; validate_asset_name "$name"
+  case "$kind" in skill) destination="$root/$MANAGED_DIR/home/.codex/skills/$name" ;; plugin) destination="$root/$MANAGED_DIR/home/.codex/plugins/$name" ;; *) die "Asset type must be skill or plugin." ;; esac
+  [[ -d "$destination" ]] || die "$kind is not installed: $name"
+  rm -rf -- "$destination"
+  lock="$root/$AI_REL/assets.lock"; tmp="${lock}.tmp"
+  awk -F '\t' -v k="$kind" -v n="$name" '!($1==k && $2==n)' "$lock" >"$tmp"; mv "$tmp" "$lock"
+  info "Removed project-local $kind: $name"
+}
+
+asset_list(){
+  local root kind="${2:-all}"
+  root="$(project_root "${1:-$PWD}")"
+  if [[ "$kind" == all ]]; then cat "$root/$AI_REL/assets.lock"; else awk -F '\t' -v k="$kind" '$1==k' "$root/$AI_REL/assets.lock"; fi
+}
+
+asset_verify(){
+  local root kind name expected source destination actual failed=0
+  root="$(project_root "${1:-$PWD}")"
+  while IFS=$'\t' read -r kind name expected source; do
+    [[ -n "$kind" ]] || continue
+    case "$kind" in skill) destination="$root/$MANAGED_DIR/home/.codex/skills/$name" ;; plugin) destination="$root/$MANAGED_DIR/home/.codex/plugins/$name" ;; *) die "Unknown asset type in lock: $kind" ;; esac
+    if [[ ! -d "$destination" ]]; then printf '[FAIL] missing %s: %s\n' "$kind" "$name" >&2; failed=1; continue; fi
+    actual="$(asset_hash "$destination")"
+    if [[ "$actual" == "$expected" ]]; then printf '[PASS] %s %s\n' "$kind" "$name"; else printf '[FAIL] checksum %s %s\n' "$kind" "$name" >&2; failed=1; fi
+  done <"$root/$AI_REL/assets.lock"
+  ((failed == 0))
+}
+
+mcp_manage(){
+  local root action name
+  root="$(project_root "${1:-$PWD}")"; action="${2:-list}"; name="${3:-}"; shift 3 || true
+  [[ "$action" == list ]] || validate_asset_name "$name"
+  require_command python3
+  python3 - "$root/$AI_REL/mcp.json" "$action" "$name" "$@" <<'PY'
+import json, os, re, shutil, sys, tempfile
+path, action, name, *args = sys.argv[1:]
+data=json.load(open(path, encoding="utf-8"))
+servers=data.setdefault("servers", {})
+if action == "list":
+    for key, value in sorted(servers.items()):
+        print(f"{key}\t{'enabled' if value.get('enabled') else 'disabled'}\t{value['command']} {' '.join(value.get('args', []))}")
+elif action == "add":
+    if not args: raise SystemExit("mcp add requires COMMAND [ARG...]")
+    command, *command_args=args
+    if not re.fullmatch(r"[A-Za-z0-9_./+-]+", command): raise SystemExit("unsafe MCP command")
+    if any(re.search(r"(?i)(api[_-]?key|token|secret|password)=", x) for x in command_args):
+        raise SystemExit("inline MCP secrets are forbidden; use .aiops/secrets/runtime.env")
+    if name in servers: raise SystemExit(f"MCP server already exists: {name}")
+    servers[name]={"command":command,"args":command_args,"enabled":False}
+elif action in ("enable","disable"):
+    if name not in servers: raise SystemExit(f"unknown MCP server: {name}")
+    servers[name]["enabled"] = action == "enable"
+elif action == "remove":
+    if name not in servers: raise SystemExit(f"unknown MCP server: {name}")
+    del servers[name]
+elif action == "test":
+    if name not in servers: raise SystemExit(f"unknown MCP server: {name}")
+    command=servers[name]["command"]
+    if "/" in command:
+        if not os.path.isfile(command) or not os.access(command, os.X_OK): raise SystemExit("MCP command is not executable")
+    elif not shutil.which(command): raise SystemExit("MCP command is not on PATH")
+    print(f"MCP {name}: definition valid")
+else: raise SystemExit("MCP action must be list, add, remove, enable, disable, or test")
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path)); os.close(fd)
+with open(tmp,"w",encoding="utf-8") as f: json.dump(data,f,indent=2,sort_keys=True); f.write("\n")
+os.chmod(tmp,0o644); os.replace(tmp,path)
+codex_config=os.path.join(os.path.dirname(os.path.dirname(path)),"home",".codex","config.toml")
+begin="# BEGIN AIOPS MANAGED MCP\n"; end="# END AIOPS MANAGED MCP\n"
+existing=""
+if os.path.exists(codex_config): existing=open(codex_config,encoding="utf-8").read()
+if begin in existing:
+    before, remainder=existing.split(begin,1)
+    if end not in remainder: raise SystemExit("unterminated managed MCP block in Codex config")
+    _, after=remainder.split(end,1); existing=before+after.lstrip("\n")
+lines=[begin]
+for key,value in sorted(servers.items()):
+    if not value.get("enabled"): continue
+    lines += [f"[mcp_servers.{key}]\n",f"command = {json.dumps(value['command'])}\n",f"args = {json.dumps(value.get('args',[]))}\n","\n"]
+lines.append(end)
+rendered=existing.rstrip()+("\n\n" if existing.strip() else "")+"".join(lines)
+os.makedirs(os.path.dirname(codex_config),exist_ok=True)
+with open(codex_config,"w",encoding="utf-8") as f: f.write(rendered)
+os.chmod(codex_config,0o600)
+PY
+}
+
+ai_audit(){
+  local root
+  root="$(project_root "${1:-$PWD}")"
+  [[ -s "$root/AGENTS.md" ]] || die "AGENTS.md is missing or empty."
+  [[ -f "$root/$AI_REL/policy.yaml" && -f "$root/$AI_REL/mcp.json" && -f "$root/$AI_REL/assets.lock" ]] || die "AI management metadata is incomplete."
+  asset_verify "$root"
+  ! grep -ERni --exclude='*.lock' --exclude='mcp.json' '(api[_-]?key|token|secret|password)[[:space:]]*[:=][[:space:]]*[^$<{[:space:]]' "$root/AGENTS.md" "$root/$AI_REL" || die "Possible inline secret found in AI metadata."
+  info "Project AI configuration audit passed: $root"
 }
 
 feature_enabled(){ [[ -f "$1/$FEATURE_REL/$2.enabled" ]]; }
@@ -392,6 +561,7 @@ verify_project(){
   [[ -d "$root/$MANAGED_DIR/home/.codex/skills" ]] || die "Project-local skills directory missing."
   [[ -d "$root/$MANAGED_DIR/home/.codex/plugins" ]] || die "Project-local plugins directory missing."
   [[ -f "$root/AGENTS.md" ]] || die "Project AGENTS.md missing."
+  [[ -f "$root/$AI_REL/policy.yaml" && -f "$root/$AI_REL/mcp.json" ]] || die "Project AI policy/configuration missing."
   grep -Fq 'source: ./.aiops/home' "$root/$COMPOSE_REL" || die "Isolated home mount missing."
   ! grep -Eq '(/var/run/docker.sock|/root/\.codex|\$\{HOME\}/\.codex)' "$root/$COMPOSE_REL" || \
     die "Unsafe host-global mount found in compose.yaml."
@@ -496,6 +666,15 @@ Project features:
   tool-install PATH NAME    Install enabled Goose/OpenCodex in isolated HOME
   secret-set PATH NAME      Prompt for a project-specific provider credential
 
+AI configuration:
+  asset-add PATH skill|plugin NAME SOURCE_DIR
+  asset-remove PATH skill|plugin NAME
+  assets PATH [skill|plugin|all]
+  asset-verify PATH         Verify locked project asset checksums
+  mcp PATH ACTION NAME [COMMAND [ARG...]]
+                            list|add|remove|enable|disable|test
+  ai-audit PATH             Audit AGENTS, skills, plugins, MCP and policy
+
 HTTPS edge (code-server):
   edge-add PATH NAME DOMAIN EMAIL [AUTH_USER]
                             Create Basic-Auth Nginx proxy and TLS certificate
@@ -535,6 +714,12 @@ main(){
     feature-disable) feature_disable "${1:-$PWD}" "${2:-}" ;;
     tool-install) tool_install "${1:-$PWD}" "${2:-}" ;;
     secret-set) secret_set "${1:-$PWD}" "${2:-}" ;;
+    asset-add) asset_add "${1:-$PWD}" "${2:-}" "${3:-}" "${4:-}" ;;
+    asset-remove) asset_remove "${1:-$PWD}" "${2:-}" "${3:-}" ;;
+    assets) asset_list "${1:-$PWD}" "${2:-all}" ;;
+    asset-verify) asset_verify "${1:-$PWD}" ;;
+    mcp) mcp_manage "${1:-$PWD}" "${2:-list}" "${3:-}" "${@:4}" ;;
+    ai-audit) ai_audit "${1:-$PWD}" ;;
     edge-add) edge_add "${1:-$PWD}" "${2:-}" "${3:-}" "${4:-}" "${5:-projectadmin}" ;;
     edge-remove) edge_remove "${1:-$PWD}" "${2:-}" ;;
     edges) edge_list "${1:-$PWD}" ;;

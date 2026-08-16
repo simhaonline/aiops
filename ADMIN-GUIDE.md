@@ -250,7 +250,60 @@ project-manager secret-set /srv/projects/example mulerouter
 
 Never commit `.aiops/home`, `.aiops/secrets`, `.aiops/backups`, or `.env`.
 
-## 7. Backup policy
+## 7. Project AI asset governance
+
+Treat skills, plugins and MCP servers as executable supply-chain inputs:
+
+```bash
+project-manager asset-add /srv/projects/example skill review-workflow /srv/approved/review-workflow
+project-manager asset-add /srv/projects/example plugin team-tools /srv/approved/team-tools
+project-manager mcp /srv/projects/example add repository-mcp repository-mcp --stdio
+project-manager mcp /srv/projects/example enable repository-mcp
+project-manager ai-audit /srv/projects/example
+```
+
+Asset sources may not contain symbolic links. Skills require `SKILL.md`, plugins
+require `.codex-plugin/plugin.json`, and installed trees are checksum-locked.
+Review source provenance and permissions before importing. MCP arguments must
+not contain credentials; provide secrets through `.aiops/secrets/runtime.env`.
+
+## 8. Collection management
+
+Create a collection only for an authorized HTTPS source:
+
+```bash
+collection-manager init /srv/projects/example docs https://example.com/docs
+collection-manager crawl /srv/projects/example docs
+collection-manager verify /srv/projects/example
+sudo collection-manager install
+sudo collection-manager schedule-add /srv/projects/example docs daily
+```
+
+The manager rejects localhost, authenticated URLs, and literal private or
+reserved IP targets. DNS and redirect policy still require network-layer
+egress controls for high-risk deployments. Collection configuration enforces
+robots compliance and a download delay; operators remain responsible for site
+terms, authorization, privacy, and retention.
+
+Publish the read-only collection index:
+
+```bash
+collection-manager ui-enable /srv/projects/example
+project-manager up /srv/projects/example
+sudo collection-manager edge-add /srv/projects/example \
+  collections.example.com admin@example.com collectionadmin
+```
+
+Back up collection data independently:
+
+```bash
+collection-manager backup /srv/projects/example /srv/backups/example-collections.tar.gz
+collection-manager restore /srv/backups/example-collections.tar.gz /srv/projects/recovered
+```
+
+Inspect or remove its timer with `schedule-status` and `schedule-remove`.
+
+## 9. Backup policy
 
 Maintain at least three copies of critical data, on two storage types, with one
 copy offline or off-site. Encrypt archives before they leave trusted storage.

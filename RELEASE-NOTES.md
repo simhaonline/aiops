@@ -6,7 +6,7 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 
 ### Installer
 
-- Rebuilt `install.sh` as the complete 20-manager bootstrap.
+- Rebuilt `install.sh` as the complete 21-manager bootstrap.
 - Exact supported bootstrap:
   `curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh | bash`
 - Downloads and verifies `SHA256SUMS.txt`.
@@ -66,6 +66,13 @@ All maintained executable manager scripts now use manager version `1.0.0`.
   WebSocket forwarding, association tracking, and orphan-proxy prevention.
 - Added missing HTTPS edge helpers for the Codex App Server and OpenCode Web.
   CLI-only tools remain intentionally unproxied, and Ollama remains private.
+- Added project-local AGENTS/skill/plugin/MCP governance with locked asset
+  checksums, symlink rejection, disabled-by-default MCP definitions, inline
+  secret rejection and a unified AI configuration audit.
+- Added `collection-manager` using pinned Scrapling workers, authorized HTTPS
+  source policy, domain allowlists, AI-targeted extraction, resource limits,
+  checksum-protected outputs, a read-only loopback dashboard, managed Nginx/TLS
+  publication, and independent backup/restore.
 
 ## Forgejo infrastructure
 

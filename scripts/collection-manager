@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+readonly MANAGER_VERSION="1.0.0"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+
+readonly MANAGER_PATH="/usr/local/bin/collection-manager"
+readonly DEFAULT_IMAGE="ghcr.io/d4vinci/scrapling@sha256:bc027f663d12e7dd55d7f6550b6d12548c2b297da6d765448095834c36d47292"
+readonly MANAGED_DIR=".aiops"
+readonly COLLECTION_REL="${MANAGED_DIR}/collections"
+readonly ENV_REL="${MANAGED_DIR}/project.env"
+readonly NGINX_MANAGER="${AIOPS_NGINX_MANAGER:-/usr/local/bin/nginx-manager}"
+
+die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+info(){ printf '[INFO] %s\n' "$*"; }
+require_command(){ command -v "$1" >/dev/null 2>&1 || die "Required command missing: $1"; }
+require_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run this operation as root."; }
+validate_name(){ [[ "$1" =~ ^[a-z][a-z0-9_-]{0,47}$ ]] || die "Collection name must be lowercase and filesystem-safe."; }
+
+project_root(){
+  local root="${1:-$PWD}"
+  [[ -d "$root" ]] || die "Project directory not found: $root"
+  root="$(cd -- "$root" && pwd -P)"
+  [[ -f "$root/$ENV_REL" ]] || die "Not a project-manager project: $root"
+  printf '%s\n' "$root"
+}
+
+env_value(){ awk -F= -v key="$2" '$1==key {print substr($0,index($0,"=")+1); exit}' "$1"; }
+config_file(){ printf '%s/%s/config/%s.env\n' "$1" "$COLLECTION_REL" "$2"; }
+data_dir(){ printf '%s/%s/data/%s\n' "$1" "$COLLECTION_REL" "$2"; }
+
+validate_url(){
+  require_command python3
+  python3 - "$1" <<'PY'
+import ipaddress, sys
+from urllib.parse import urlsplit
+u=urlsplit(sys.argv[1])
+if u.scheme != "https" or not u.hostname or u.username or u.password:
+    raise SystemExit("collection URL must be an unauthenticated HTTPS URL")
+host=u.hostname.lower().rstrip(".")
+if host == "localhost" or host.endswith(".localhost"):
+    raise SystemExit("localhost collection targets are forbidden")
+try:
+    ip=ipaddress.ip_address(host)
+except ValueError:
+    pass
+else:
+    if not ip.is_global: raise SystemExit("private, loopback, and reserved IP targets are forbidden")
+print(host)
+PY
+}
+
+ensure_layout(){
+  local root="$1"
+  install -d -m 0700 "$root/$COLLECTION_REL/config" "$root/$COLLECTION_REL/data" "$root/$COLLECTION_REL/backups"
+}
+
+init_collection(){
+  local root name url host config image
+  root="$(project_root "${1:-}")"; name="${2:-}"; url="${3:-}"; validate_name "$name"
+  [[ -n "$url" ]] || die "Usage: collection-manager init PROJECT NAME HTTPS_URL"
+  host="$(validate_url "$url")"; ensure_layout "$root"; config="$(config_file "$root" "$name")"
+  [[ ! -e "$config" ]] || die "Collection already exists: $name"
+  image="${AIOPS_SCRAPLING_IMAGE:-$DEFAULT_IMAGE}"
+  [[ "$image" =~ ^ghcr\.io/d4vinci/scrapling@sha256:[0-9a-f]{64}$ ]] || die "Scrapling image must use an immutable GHCR SHA-256 digest."
+  printf 'NAME=%s\nSTART_URL=%s\nALLOWED_HOST=%s\nSCRAPLING_IMAGE=%s\nROBOTS_TXT_OBEY=true\nDOWNLOAD_DELAY=1.0\n' \
+    "$name" "$url" "$host" "$image" >"$config"
+  chmod 0600 "$config"; install -d -m 0700 "$(data_dir "$root" "$name")"
+  render_index "$root"
+  info "Initialized collection '$name' for allowed host '$host'."
+}
+
+load_collection(){
+  local root="$1" name="$2" config
+  validate_name "$name"; config="$(config_file "$root" "$name")"; [[ -f "$config" ]] || die "Unknown collection: $name"
+  NAME="$(env_value "$config" NAME)"; START_URL="$(env_value "$config" START_URL)"
+  ALLOWED_HOST="$(env_value "$config" ALLOWED_HOST)"; SCRAPLING_IMAGE="$(env_value "$config" SCRAPLING_IMAGE)"
+  ROBOTS_TXT_OBEY="$(env_value "$config" ROBOTS_TXT_OBEY)"; DOWNLOAD_DELAY="$(env_value "$config" DOWNLOAD_DELAY)"
+  [[ "$NAME" == "$name" && "$ROBOTS_TXT_OBEY" == true ]] || die "Collection policy is invalid."
+  [[ "$(validate_url "$START_URL")" == "$ALLOWED_HOST" ]] || die "Collection URL violates its host allowlist."
+  [[ "$DOWNLOAD_DELAY" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "Invalid collection delay."
+}
+
+html_escape(){ sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/"/\&quot;/g'; }
+render_index(){
+  local root="$1" index config name file rel stamp
+  ensure_layout "$root"; index="$root/$COLLECTION_REL/data/index.html"
+  {
+    printf '<!doctype html><html><head><meta charset="utf-8"><title>AiOps Collections</title></head><body><h1>AiOps Collections</h1><ul>\n'
+    while IFS= read -r config; do
+      name="$(env_value "$config" NAME)"; printf '<li><strong>%s</strong><ul>\n' "$(printf '%s' "$name" | html_escape)"
+      while IFS= read -r file; do
+        rel="${file#"$root/$COLLECTION_REL/data/"}"; stamp="$(basename "$file")"
+        printf '<li><a href="/%s">%s</a></li>\n' "$(printf '%s' "$rel" | html_escape)" "$(printf '%s' "$stamp" | html_escape)"
+      done < <(find "$(data_dir "$root" "$name")" -maxdepth 1 -type f -name '*.md' | sort -r)
+      printf '</ul></li>\n'
+    done < <(find "$root/$COLLECTION_REL/config" -maxdepth 1 -type f -name '*.env' | sort)
+    printf '</ul></body></html>\n'
+  } >"$index"
+  chmod 0644 "$index"
+}
+
+robots_check(){
+  local url="$1" host body
+  host="$(validate_url "$url")"
+  body="$(curl -fsSL --connect-timeout 5 --max-time 15 "https://${host}/robots.txt" 2>/dev/null || true)"
+  python3 - "$url" "$body" <<'PY'
+import sys
+from urllib.robotparser import RobotFileParser
+url, body=sys.argv[1:]
+if body.strip():
+    parser=RobotFileParser(); parser.parse(body.splitlines())
+    if not parser.can_fetch("AiOps-Collection/1.0",url):
+        raise SystemExit("robots.txt disallows this collection URL")
+PY
+}
+
+crawl(){
+  local root name output stamp outdir
+  root="$(project_root "${1:-}")"; name="${2:-}"; load_collection "$root" "$name"
+  require_command docker; require_command curl; robots_check "$START_URL"
+  outdir="$(data_dir "$root" "$name")"; stamp="$(date -u +%Y%m%dT%H%M%SZ)"; output="page-${stamp}.md"
+  docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --pids-limit 256 --memory 2g --cpus 2 --tmpfs /tmp:rw,noexec,nosuid,size=1g \
+    --volume "$outdir:/data:rw" "$SCRAPLING_IMAGE" \
+    extract get "$START_URL" "/data/$output" --ai-targeted
+  [[ -s "$outdir/$output" ]] || die "Scrapling did not produce $output"
+  chmod 0600 "$outdir/$output"; sha256sum "$outdir/$output" >"$outdir/$output.sha256"; chmod 0600 "$outdir/$output.sha256"
+  render_index "$root"; info "Collection completed: $outdir/$output"
+}
+
+list_collections(){
+  local root config
+  root="$(project_root "${1:-$PWD}")"; ensure_layout "$root"
+  while IFS= read -r config; do printf '%-24s %s\n' "$(env_value "$config" NAME)" "$(env_value "$config" START_URL)"; done \
+    < <(find "$root/$COLLECTION_REL/config" -maxdepth 1 -type f -name '*.env' | sort)
+}
+
+verify(){
+  local root config name dir file
+  root="$(project_root "${1:-$PWD}")"; ensure_layout "$root"
+  while IFS= read -r config; do
+    [[ "$(stat -c %a "$config")" == 600 ]] || die "Collection config must be 0600: $config"
+    name="$(env_value "$config" NAME)"; load_collection "$root" "$name"; dir="$(data_dir "$root" "$name")"; [[ -d "$dir" ]] || die "Collection data directory missing: $name"
+    while IFS= read -r file; do (cd "$(dirname "$file")" && sha256sum -c "$(basename "$file")") >/dev/null; done < <(find "$dir" -type f -name '*.sha256')
+  done < <(find "$root/$COLLECTION_REL/config" -maxdepth 1 -type f -name '*.env' | sort)
+  info "Collection policy and stored checksums verified: $root"
+}
+
+ui_enable(){
+  local root
+  root="$(project_root "${1:-$PWD}")"; ensure_layout "$root"; render_index "$root"
+  grep -Eq '^AIOPS_COLLECTION_PORT=19[0-9]{3}$' "$root/$ENV_REL" || die "Project lacks a valid AIOPS_COLLECTION_PORT."
+  cat >"$root/$MANAGED_DIR/features/collection-ui.yaml" <<'EOF'
+services:
+  collection-ui:
+    image: nginxinc/nginx-unprivileged:1.27.5-alpine
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=8m
+    volumes:
+      - type: bind
+        source: ./.aiops/collections/data
+        target: /usr/share/nginx/html
+        read_only: true
+    ports:
+      - "127.0.0.1:${AIOPS_COLLECTION_PORT}:8080"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - project
+EOF
+  : >"$root/$MANAGED_DIR/features/collection-ui.enabled"; chmod 0600 "$root/$MANAGED_DIR/features/collection-ui.enabled"
+  info "Collection dashboard enabled; start the project with project-manager up."
+}
+
+ui_disable(){
+  local root="$1"
+  root="$(project_root "$root")"; [[ ! -f "$root/$COLLECTION_REL/ui.edge" ]] || die "Remove the collection edge before disabling its dashboard."
+  rm -f "$root/$MANAGED_DIR/features/collection-ui.yaml" "$root/$MANAGED_DIR/features/collection-ui.enabled"
+  info "Collection dashboard disabled."
+}
+
+edge_add(){
+  local root domain email user port upstream record
+  require_root; root="$(project_root "${1:-}")"; domain="${2:-}"; email="${3:-}"; user="${4:-collectionadmin}"
+  [[ -x "$NGINX_MANAGER" ]] || die "nginx-manager is required."
+  [[ -f "$root/$MANAGED_DIR/features/collection-ui.enabled" ]] || die "Enable and start the collection UI first."
+  port="$(env_value "$root/$ENV_REL" AIOPS_COLLECTION_PORT)"; [[ "$port" =~ ^19[0-9]{3}$ ]] || die "Invalid collection UI port."
+  upstream="http://127.0.0.1:$port"; curl -fsS --connect-timeout 2 --max-time 8 "$upstream/" >/dev/null || die "Collection UI is not healthy at $upstream"
+  "$NGINX_MANAGER" proxy-add "$domain" "$upstream" "$user"; "$NGINX_MANAGER" ssl-issue "$domain" "$email"; "$NGINX_MANAGER" site-verify "$domain"
+  record="$root/$COLLECTION_REL/ui.edge"; printf 'DOMAIN=%s\nUPSTREAM=%s\n' "${domain,,}" "$upstream" >"$record"; chown --reference="$root/$ENV_REL" "$record"; chmod 0600 "$record"
+  info "Collection dashboard edge ready: https://${domain,,}"
+}
+
+edge_remove(){
+  local root record domain
+  require_root; root="$(project_root "${1:-}")"; record="$root/$COLLECTION_REL/ui.edge"; [[ -f "$record" ]] || die "No collection edge record exists."
+  domain="$(env_value "$record" DOMAIN)"; "$NGINX_MANAGER" proxy-remove "$domain"; rm -f "$record"; info "Removed collection dashboard edge: $domain"
+}
+
+backup(){
+  local root output stamp base
+  root="$(project_root "${1:-}")"; output="${2:-}"; stamp="$(date -u +%Y%m%dT%H%M%SZ)"; base="$(basename "$root")"
+  [[ -n "$output" ]] || output="$root/$COLLECTION_REL/backups/${base}-collections-${stamp}.tar.gz"
+  [[ "$output" == /* ]] || output="$PWD/$output"; install -d -m 0700 "$(dirname "$output")"
+  tar --exclude="./backups" -C "$root/$COLLECTION_REL" -czf "$output" .; chmod 0600 "$output"; sha256sum "$output" >"$output.sha256"; chmod 0600 "$output.sha256"
+  info "Collection backup created: $output"
+}
+
+validate_archive(){ local e; while IFS= read -r e; do [[ "$e" != /* && "/$e/" != *"/../"* ]] || die "Unsafe archive entry: $e"; done < <(tar -tzf "$1"); }
+restore(){
+  local root archive="${1:-}"
+  [[ -f "$archive" ]] || die "Backup archive not found: $archive"; root="$(project_root "${2:-}")"
+  [[ ! -e "$root/$COLLECTION_REL" || -z "$(find "$root/$COLLECTION_REL" -mindepth 1 -print -quit 2>/dev/null)" ]] || die "Project collection storage must be absent or empty."
+  [[ ! -f "$archive.sha256" ]] || (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive.sha256")")
+  validate_archive "$archive"; install -d -m 0700 "$root/$COLLECTION_REL"; tar -xzf "$archive" -C "$root/$COLLECTION_REL" --no-same-owner; verify "$root"
+}
+
+schedule_unit(){
+  local root="$1" name="$2" project
+  project="$(env_value "$root/$ENV_REL" AIOPS_PROJECT_NAME)"; validate_name "$project"; validate_name "$name"
+  printf 'aiops-collection-%s-%s\n' "$project" "$name"
+}
+
+schedule_add(){
+  local root name calendar unit service timer
+  require_root; root="$(project_root "${1:-}")"; name="${2:-}"; calendar="${3:-}"; load_collection "$root" "$name"
+  [[ -x "$MANAGER_PATH" ]] || die "Install collection-manager before creating schedules."
+  [[ "$root" != *[[:space:]]* ]] || die "Scheduled project paths may not contain whitespace."
+  [[ -n "$calendar" && "$calendar" =~ ^[A-Za-z0-9*:,./_@~-]+$ ]] || die "Use a single systemd OnCalendar expression without spaces."
+  unit="$(schedule_unit "$root" "$name")"; service="/etc/systemd/system/${unit}.service"; timer="/etc/systemd/system/${unit}.timer"
+  cat >"$service" <<EOF
+[Unit]
+Description=AiOps collection ${name} for $(basename "$root")
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${MANAGER_PATH} crawl ${root} ${name}
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+  cat >"$timer" <<EOF
+[Unit]
+Description=Schedule ${unit}
+
+[Timer]
+OnCalendar=${calendar}
+Persistent=true
+RandomizedDelaySec=5m
+Unit=${unit}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 0644 "$service" "$timer"; systemctl daemon-reload; systemctl enable --now "${unit}.timer"
+  info "Collection schedule enabled: $unit ($calendar)"
+}
+
+schedule_remove(){
+  local root name unit
+  require_root; root="$(project_root "${1:-}")"; name="${2:-}"; unit="$(schedule_unit "$root" "$name")"
+  systemctl disable --now "${unit}.timer" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${unit}.timer" "/etc/systemd/system/${unit}.service"; systemctl daemon-reload
+  info "Collection schedule removed: $unit"
+}
+
+schedule_status(){
+  local root name unit
+  root="$(project_root "${1:-}")"; name="${2:-}"; unit="$(schedule_unit "$root" "$name")"
+  systemctl --no-pager --full status "${unit}.timer" 2>/dev/null || true
+  systemctl list-timers --all "${unit}.timer" --no-pager
+}
+
+install_manager(){ require_root; install -o root -g root -m 0755 "$(readlink -f "${BASH_SOURCE[0]}")" "$MANAGER_PATH"; info "Installed $MANAGER_PATH"; }
+help(){ cat <<EOF
+collection-manager $MANAGER_VERSION
+
+Isolated Scrapling collection management for project-manager projects.
+
+Lifecycle:
+  init PROJECT NAME HTTPS_URL
+  crawl PROJECT NAME
+  list [PROJECT]
+  verify [PROJECT]
+  backup PROJECT [ABSOLUTE_FILE]
+  restore ARCHIVE PROJECT
+
+Dashboard:
+  ui-enable PROJECT | ui-disable PROJECT
+  edge-add PROJECT DOMAIN EMAIL [AUTH_USER]
+  edge-remove PROJECT
+
+Scheduling:
+  schedule-add PROJECT NAME ONCALENDAR
+  schedule-remove PROJECT NAME
+  schedule-status PROJECT NAME
+
+Manager: install | version | help
+
+Policy: digest-pinned Scrapling image (linux/amd64), HTTPS/domain allowlist, robots compliance,
+AI-targeted extraction, loopback-only dashboard, resource limits, no host
+Docker socket in project containers, and checksum-protected collected files.
+EOF
+}
+
+case "${1:-help}" in
+  init) init_collection "${2:-}" "${3:-}" "${4:-}" ;; crawl) crawl "${2:-}" "${3:-}" ;;
+  list) list_collections "${2:-$PWD}" ;; verify) verify "${2:-$PWD}" ;;
+  ui-enable) ui_enable "${2:-$PWD}" ;; ui-disable) ui_disable "${2:-$PWD}" ;;
+  edge-add) edge_add "${2:-}" "${3:-}" "${4:-}" "${5:-collectionadmin}" ;; edge-remove) edge_remove "${2:-}" ;;
+  backup) backup "${2:-}" "${3:-}" ;; restore) restore "${2:-}" "${3:-}" ;;
+  schedule-add) schedule_add "${2:-}" "${3:-}" "${4:-}" ;; schedule-remove) schedule_remove "${2:-}" "${3:-}" ;;
+  schedule-status) schedule_status "${2:-}" "${3:-}" ;;
+  install) install_manager ;; version) echo "collection-manager $MANAGER_VERSION" ;; help|-h|--help) help ;; *) help >&2; exit 2 ;;
+esac

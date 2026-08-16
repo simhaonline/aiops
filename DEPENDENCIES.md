@@ -19,7 +19,8 @@
 9. `opencode-manager`, `freebuff-manager`, `llmrouter-manager` - require NVM/Node.
 10. `litellm-manager` - Python/venv based; Nginx optional.
 11. `project-manager` - Docker Compose based, isolated per-project development.
-12. `manager-suite` - cross-manager health/inventory.
+12. `collection-manager` - requires `project-manager` and Docker; isolated Scrapling collection workers.
+13. `manager-suite` - cross-manager health/inventory.
 
 ## Shared services
 
@@ -29,3 +30,7 @@
 
 `project-manager` requires Docker with the Compose plugin. It creates a separate
 home/configuration mount and Compose network for every project.
+
+`collection-manager` stores collection policy and data inside the selected
+project, uses a pinned Scrapling image, and can publish its loopback dashboard
+through `nginx-manager`.

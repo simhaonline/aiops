@@ -26,6 +26,7 @@ readonly MANAGERS=(
   litellm-manager
   llmrouter-manager
   project-manager
+  collection-manager
   manager-suite
 )
 

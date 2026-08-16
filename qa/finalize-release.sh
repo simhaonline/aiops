@@ -49,7 +49,7 @@ manifest={
     "target_os": "Ubuntu 24.04 LTS",
     "managers": managers,
     "installer_policy": {
-        "default_installs": "20 canonical manager scripts only",
+        "default_installs": "21 canonical manager scripts only",
         "main_ref_resolution": "resolve to immutable Git commit before payload fetch",
     },
 }
