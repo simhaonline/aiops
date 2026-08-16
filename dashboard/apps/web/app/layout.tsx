@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./styles.css";
 import "./studio.css";
+import "./platform.css";
 
 export const metadata: Metadata = {
   title: "SIMHA AiOps",

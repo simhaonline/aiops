@@ -30,6 +30,11 @@ grep -Fq 'ENABLE ROW LEVEL SECURITY' dashboard/database/migrations/001_initial.s
 grep -Fq 'create_hypertable' dashboard/database/migrations/001_initial.sql
 grep -Fq 'vector(1536)' dashboard/database/migrations/001_initial.sql
 grep -Fq 'app.tenant_id' dashboard/database/migrations/001_initial.sql
+grep -Fq 'platform-root' dashboard/apps/web/app/platform.css
+grep -Fq 'Topped-up balance' dashboard/apps/web/app/ui/platform-dashboard.tsx
+grep -Fq 'All dates and times are shown in GMT+4' dashboard/apps/web/app/ui/platform-dashboard.tsx
+grep -Fq 'Export CSV' dashboard/apps/web/app/ui/platform-dashboard.tsx
+grep -Fq 'PlatformRoute' 'dashboard/apps/web/app/[...segments]/page.tsx'
 
 grep -Fq 'operation is not allowlisted' dashboard/broker/main.go
 grep -Fq 'project symlink escapes /srv/projects' dashboard/broker/main.go
