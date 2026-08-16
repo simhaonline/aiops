@@ -1,6 +1,7 @@
 # Q-AI security
 
-- `Q_AI_ENABLED` defaults to false.
+- `Q_AI_ENABLED` and `Q_AI_PRODUCTION_ACK` default to false; both are required
+  for activation.
 - Evaluate/models endpoints require the existing dashboard token and must stay
   behind the loopback/authenticated edge.
 - LiteLLM credentials remain server-side; Q-AI only uses its loopback gateway.

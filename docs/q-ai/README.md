@@ -23,12 +23,13 @@ available.
 Minimal internal configuration is supplied as JSON, for example:
 
 ```sh
-export Q_AI_ENABLED=false
+export Q_AI_ENABLED=true
+export Q_AI_PRODUCTION_ACK=true
 export Q_AI_MODELS_JSON='[{"provider":"openrouter","modelId":"vendor/model","enabled":true,"reliability":0.8,"accuracy":0.8,"calibration":0.8,"latencyEfficiency":0.8,"costEfficiency":0.8,"taskFit":0.8,"domainFit":0.8,"independence":0.8,"availability":1}]'
 ```
 
-Keep the flag false until the model registry, authentication, data policy, and
-LiteLLM route have been reviewed.
+Both flags are required. Keep them false until the model registry,
+authentication, data policy, and LiteLLM route have been reviewed.
 
 See [REPOSITORY_AUDIT.md](REPOSITORY_AUDIT.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 and [ROLLBACK.md](ROLLBACK.md).
