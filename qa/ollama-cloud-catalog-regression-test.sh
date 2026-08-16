@@ -25,6 +25,7 @@ done
 
 grep -Fq 'Refusing model outside the approved Cloud catalog' "$SCRIPT"
 grep -Fq 'install_cloud_models' "$SCRIPT"
+grep -Fq 'sync_cloud_models' "$SCRIPT"
 
 (
   set -- help

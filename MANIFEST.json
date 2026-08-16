@@ -4,8 +4,8 @@
   "managers": {
     "aiops": {
       "version": "1.0.0",
-      "sha256": "55d1657dd3b90d43a81c177252295ccbac6504cc68afe7506c878d7bce1f8b80",
-      "size_bytes": 6653
+      "sha256": "19b444d761784a6ddcc7dbee7a1813bc76c0d374921fc26fadeb84051c9b1f00",
+      "size_bytes": 9126
     },
     "aiops-dashboard-manager": {
       "version": "1.0.0",
@@ -94,8 +94,8 @@
     },
     "ollama-manager": {
       "version": "1.0.0",
-      "sha256": "d288e9ae7c3f72672551f2331234be727fac84843299d854fb332de40109566e",
-      "size_bytes": 33248
+      "sha256": "7b0b98e1181f3e4663768f3b4001a32c4911aa5a0b46515b47991be1954286c8",
+      "size_bytes": 33501
     },
     "opencode-manager": {
       "version": "1.0.0",

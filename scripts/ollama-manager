@@ -30,6 +30,7 @@ umask 027
 #   cloud-models
 #   cloud-catalog
 #   install-cloud [MODEL...]
+#   sync-cloud
 #   register-cloud MODEL
 #   chat MODEL "PROMPT"
 #   test MODEL
@@ -626,6 +627,11 @@ install_cloud_models() {
   done
 }
 
+sync_cloud_models() {
+  install_cloud_models "${CLOUD_PROXY_MODELS[@]}"
+  info "Approved Ollama Cloud proxy catalog synchronized."
+}
+
 signin_ollama() {
   require_cmd ollama
   ollama signin
@@ -1034,6 +1040,7 @@ Cloud operations:
   cloud-models              List models exposed by Ollama Cloud API
   cloud-catalog             List approved Cloud-only localhost proxy models
   install-cloud [MODEL...]  Select or install one or more approved Cloud models
+  sync-cloud                Re-register every approved Cloud model
   register-cloud MODEL      Register one approved Cloud model (compatibility alias)
   chat MODEL "PROMPT"       Stream directly from https://ollama.com/api
   test MODEL                Direct Cloud inference + network/performance metrics
@@ -1099,6 +1106,7 @@ main() {
     cloud-models) cloud_models ;;
     cloud-catalog) cloud_catalog ;;
     install-cloud) shift; install_cloud_models "$@" ;;
+    sync-cloud) sync_cloud_models ;;
     register-cloud) shift; register_cloud_model "${1:-}" ;;
     chat) shift; direct_chat "${1:-}" "${@:2}" ;;
     test) shift; test_cloud "${1:-}" ;;

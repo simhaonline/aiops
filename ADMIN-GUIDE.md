@@ -106,6 +106,21 @@ published pricing dimension. NVIDIA models must both appear in the authenticated
 hosted API and match a model card explicitly verified as `Free Endpoint` in this
 manager release. Unknown or ambiguous models fail closed and are not configured.
 
+Enable a root-managed cron job to refresh provider inventories and re-register
+the approved Ollama Cloud catalog. Daily runs start at 03:17; weekly runs use
+Sunday at 03:17 UTC when the host uses the suite's default UTC policy:
+
+```bash
+sudo aiops model-refresh                  # run immediately
+sudo aiops model-refresh-schedule daily   # or: weekly
+aiops model-refresh-status
+sudo aiops model-refresh-disable
+```
+
+Logs are appended to `/var/log/simha-aiops/model-refresh.log`. A provider
+failure does not bypass another provider, but the overall job exits non-zero so
+cron monitoring can detect partial refreshes.
+
 Install rootless Docker before project environments or Forgejo:
 
 ```bash

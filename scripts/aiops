@@ -18,6 +18,8 @@ readonly -a MUTATING_COMMANDS=(
   start stop restart enable disable reset edge-add edge-remove
   schedule-add schedule-remove feature-enable feature-disable
 )
+readonly MODEL_REFRESH_CRON="/etc/cron.d/simha-aiops-model-refresh"
+readonly MODEL_REFRESH_LOG_DIR="/var/log/simha-aiops"
 
 die(){ printf '[aiops] ERROR: %s\n' "$*" >&2; exit 2; }
 log(){ printf '[aiops] %s\n' "$*"; }
@@ -79,6 +81,63 @@ list_managers(){
 }
 
 quote_command(){ printf '%q ' "$@"; printf '\n'; }
+
+require_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "This command requires root/sudo."; }
+
+model_refresh(){
+  require_root
+  local failed=0 manager
+
+  manager="$(manager_path litellm-manager 2>/dev/null || true)"
+  if [[ -n "$manager" ]]; then
+    "$manager" sync-free-models nvidia || { log "NVIDIA free-model refresh failed."; failed=1; }
+    "$manager" sync-free-models openrouter || { log "OpenRouter free-model refresh failed."; failed=1; }
+  else
+    log "SKIP LiteLLM providers (litellm-manager not installed)"
+  fi
+
+  manager="$(manager_path ollama-manager 2>/dev/null || true)"
+  if [[ -n "$manager" ]]; then
+    "$manager" sync-cloud || { log "Ollama Cloud refresh failed."; failed=1; }
+  else
+    log "SKIP Ollama Cloud (ollama-manager not installed)"
+  fi
+
+  ((failed == 0))
+}
+
+schedule_model_refresh(){
+  require_root
+  local frequency="${1:-daily}" cron_schedule temp
+  case "$frequency" in
+    daily) cron_schedule='17 3 * * *' ;;
+    weekly) cron_schedule='17 3 * * 0' ;;
+    *) die "Frequency must be 'daily' or 'weekly'." ;;
+  esac
+  [[ -x /usr/local/bin/aiops ]] || die "Install aiops at /usr/local/bin/aiops before enabling its cron job."
+  install -d -o root -g root -m 0750 "$MODEL_REFRESH_LOG_DIR"
+  temp="$(mktemp)"
+  cat >"$temp" <<EOF
+# Managed by aiops. Refresh verified zero-cost/Cloud model catalogs.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+${cron_schedule} root /usr/local/bin/aiops model-refresh >>${MODEL_REFRESH_LOG_DIR}/model-refresh.log 2>&1
+EOF
+  install -o root -g root -m 0644 "$temp" "$MODEL_REFRESH_CRON"
+  rm -f -- "$temp"
+  log "Model refresh cron enabled ($frequency): $MODEL_REFRESH_CRON"
+}
+
+disable_model_refresh(){ require_root; rm -f -- "$MODEL_REFRESH_CRON"; log "Model refresh cron disabled."; }
+
+model_refresh_status(){
+  if [[ -f "$MODEL_REFRESH_CRON" ]]; then
+    echo "Model refresh cron: ENABLED"
+    sed -n '1,20p' "$MODEL_REFRESH_CRON"
+  else
+    echo "Model refresh cron: DISABLED"
+  fi
+}
 
 run_targets(){
   local dry_run="$1" assume_yes="$2" keep_going="$3" use_sudo="$4"
@@ -147,6 +206,9 @@ Usage:
   aiops run [OPTIONS] --phase PHASE -- COMMAND [ARG...]
   aiops run [OPTIONS] --all -- COMMAND [ARG...]
   aiops status | verify | versions
+  aiops model-refresh
+  aiops model-refresh-schedule [daily|weekly]
+  aiops model-refresh-disable | model-refresh-status
 
 Run options:
   --dry-run             Print the exact commands without executing them
@@ -162,6 +224,7 @@ Examples:
   aiops run --phase agents --continue-on-error --sudo -- restart
   aiops run --all --dry-run -- update
   aiops run --all --yes --continue-on-error --sudo -- update
+  sudo aiops model-refresh-schedule daily
 
 Bulk mutating operations require --yes. Prefer --dry-run first. Arguments after
 '--' are passed unchanged to every selected manager; no shell evaluation occurs.
@@ -176,6 +239,10 @@ case "${1:-help}" in
     [[ -n "$suite" ]] || die "manager-suite is not installed."
     "$suite" "$1"
     ;;
+  model-refresh) model_refresh ;;
+  model-refresh-schedule) schedule_model_refresh "${2:-daily}" ;;
+  model-refresh-disable) disable_model_refresh ;;
+  model-refresh-status) model_refresh_status ;;
   version) printf 'aiops %s\n' "$MANAGER_VERSION" ;;
   help|-h|--help) help ;;
   *) help >&2; exit 2 ;;

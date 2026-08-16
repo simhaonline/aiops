@@ -199,6 +199,9 @@ pass "Ollama Cloud-only model catalog regression"
 qa/litellm-free-providers-regression-test.sh >/dev/null
 pass "LiteLLM free-provider filtering regression"
 
+qa/model-refresh-cron-regression-test.sh >/dev/null
+pass "Scheduled model refresh regression"
+
 # Test the real bootstrap download/check logic without Internet or mutation.
 # The mock covers both GitHub commit resolution and raw downloads from the
 # resulting immutable commit SHA.
