@@ -1,0 +1,2466 @@
+#!/usr/bin/env bash
+# LEGACY SUPPORT SNAPSHOT
+# Suite archive: pre-1.0.1 internal manager lineage
+# This file is NOT installed on PATH and is preserved for rollback/reference only.
+readonly AIOPS_LEGACY_RELEASE="1.0.1"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 027
+
+# =============================================================================
+# DeepSeek Harness Manager
+# Version: 4.0.0
+# Target: Ubuntu 24.04 LTS
+#
+# Clean-server design:
+#   - Requires the existing nvm-manager and ollama-manager.
+#   - Reuses the existing root nvm-manager Node 24 runtime through a read-only bind mount.
+#   - Never installs a second Harness-specific Node.js runtime.
+#   - Uses Ollama's localhost OpenAI-compatible endpoint as the AI provider.
+#   - Installs @deepseek-ai/dsh into one canonical immutable runtime:
+#       /opt/deepseek-harness/app
+#   - Stages and preflights every install before activation.
+#   - Explicitly handles npm 11/12 install-script policy for node-pty.
+#   - Verifies dsh execution as the actual service account.
+#   - Runs Harness only on 127.0.0.1.
+#   - Supports multiple codebases via opt-in ACLs.
+#   - Public HTTPS is handled separately by nginx-manager on the same server.
+#   - Never exposes Ollama or Harness directly to the public network.
+#   - Never deletes the unrelated "aiops" Linux account.
+#
+# Current topology default:
+#   Harness/Nginx server: 152.53.67.111
+# =============================================================================
+
+readonly HM_VERSION="4.0.0"
+readonly HM_MANAGER_PATH="/usr/local/bin/harness-manager"
+readonly HM_LOCK_FILE="/run/lock/harness-manager.lock"
+
+readonly HM_USER="harness"
+readonly HM_GROUP="harness"
+readonly HM_LEGACY_USER="aiops"
+
+readonly HM_NVM_MANAGER="/usr/local/bin/nvm-manager"
+readonly HM_OLLAMA_MANAGER="/usr/local/bin/ollama-manager"
+readonly HM_DOCKER_MANAGER="/usr/local/bin/docker-manager"
+readonly HM_GVM_MANAGER="/usr/local/bin/gvm-manager"
+readonly HM_MINICONDA_MANAGER="/usr/local/bin/miniconda-manager"
+
+readonly HM_BASE="/opt/deepseek-harness"
+readonly HM_APP="${HM_BASE}/app"
+readonly HM_PREVIOUS="${HM_BASE}/app.previous"
+readonly HM_DSH="${HM_APP}/node_modules/.bin/dsh"
+readonly HM_INSTALLED_VERSION_FILE="${HM_BASE}/installed-version"
+
+readonly HM_STATE="/var/lib/deepseek-harness"
+readonly HM_DSH_HOME="${HM_STATE}/dsh"
+readonly HM_WORKSPACE="${HM_STATE}/workspace"
+readonly HM_CACHE="${HM_STATE}/cache"
+readonly HM_NPM_CACHE="${HM_CACHE}/npm"
+
+readonly HM_ROOT_NVM_DIR="/root/.nvm"
+readonly HM_ROOT_NVM_DEFAULT="${HM_ROOT_NVM_DIR}/default-bin"
+readonly HM_NODE_RUNTIME="${HM_BASE}/node-runtime"
+readonly HM_NODE_BIN_DIR="${HM_NODE_RUNTIME}/bin"
+readonly HM_NODE="${HM_NODE_BIN_DIR}/node"
+readonly HM_NPM="${HM_NODE_BIN_DIR}/npm"
+readonly HM_NODE_MAJOR="24"
+
+readonly HM_CONFIG="/etc/deepseek-harness"
+readonly HM_ENV="${HM_CONFIG}/harness.env"
+readonly HM_TRUSTED="${HM_CONFIG}/trusted-hosts"
+readonly HM_PROJECTS="${HM_CONFIG}/projects.conf"
+
+readonly HM_RUNNER="/usr/local/libexec/deepseek-harness-web"
+readonly HM_SERVICE="deepseek-harness.service"
+readonly HM_SERVICE_FILE="/etc/systemd/system/${HM_SERVICE}"
+
+readonly HM_HARNESS_SERVER_IP="${HARNESS_SERVER_IP:-152.53.67.111}"
+readonly HM_DEFAULT_HARNESS_PORT="3080"
+
+readonly HM_OLLAMA_LOCAL="http://127.0.0.1:11434"
+readonly HM_OLLAMA_OPENAI="http://127.0.0.1:11434/v1"
+readonly HM_OLLAMA_DUMMY_KEY="ollama"
+
+HM_LOCK_TIMEOUT="${LOCK_TIMEOUT:-120}"
+HM_APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-600}"
+HM_LOG_LINES="${LOG_LINES:-200}"
+
+# Staging outputs are global on purpose. Do not capture staging functions through
+# command substitution: their logs must stay visible and must not corrupt values.
+HM_STAGE_PATH=""
+HM_STAGE_VERSION=""
+
+# -----------------------------------------------------------------------------
+# Logging / failures
+# -----------------------------------------------------------------------------
+
+hm_log()  { printf '\n==> %s\n' "$*"; }
+hm_info() { printf '[INFO] %s\n' "$*"; }
+hm_warn() { printf '[WARN] %s\n' "$*" >&2; }
+hm_die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+
+hm_err_trap() {
+  local rc=$?
+  local line="${BASH_LINENO[0]:-unknown}"
+  printf '[ERROR] harness-manager failed at line %s (exit %s).\n' "$line" "$rc" >&2
+  exit "$rc"
+}
+trap hm_err_trap ERR
+
+hm_require_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || hm_die "Run this command with sudo/root."
+}
+
+hm_require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || hm_die "Required command missing: $1"
+}
+
+hm_require_ubuntu_2404() {
+  [[ -r /etc/os-release ]] || hm_die "Cannot read /etc/os-release."
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  [[ "${ID:-}" == "ubuntu" ]] || hm_die "Ubuntu is required."
+  [[ "${VERSION_ID:-}" == "24.04" ]] || \
+    hm_die "This manager is validated for Ubuntu 24.04 LTS; found ${PRETTY_NAME:-unknown}."
+}
+
+hm_lock() {
+  hm_require_root
+  install -d -m 0755 /run/lock
+  exec 9>"$HM_LOCK_FILE"
+  flock -w "$HM_LOCK_TIMEOUT" 9 || \
+    hm_die "Another harness-manager operation is active."
+}
+
+hm_is_safe_managed_path() {
+  local p="$1"
+  [[ "$p" == /* ]] || return 1
+  case "$p" in
+    /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+      return 1 ;;
+  esac
+  [[ ! -L "$p" ]] || return 1
+}
+
+hm_validate_managed_paths() {
+  local p
+  for p in "$HM_BASE" "$HM_APP" "$HM_STATE" "$HM_DSH_HOME" "$HM_CONFIG"; do
+    hm_is_safe_managed_path "$p" || hm_die "Unsafe managed path: $p"
+  done
+}
+
+hm_apt() {
+  DEBIAN_FRONTEND=noninteractive \
+    apt-get -o "DPkg::Lock::Timeout=${HM_APT_LOCK_TIMEOUT}" "$@"
+}
+
+hm_install_os_dependencies() {
+  local packages=(
+    acl
+    build-essential
+    ca-certificates
+    curl
+    git
+    openssh-client
+    python3
+    python3-yaml
+    tar
+    util-linux
+  )
+  local missing=() pkg
+
+  for pkg in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
+      missing+=("$pkg")
+    fi
+  done
+
+  if ((${#missing[@]} == 0)); then
+    hm_info "Required OS packages are already installed; skipping apt update."
+    return 0
+  fi
+
+  hm_log "Installing Harness OS dependencies"
+  hm_info "Missing: ${missing[*]}"
+  hm_apt update
+  hm_apt install -y --no-install-recommends "${missing[@]}"
+}
+
+# -----------------------------------------------------------------------------
+# Manager self-install / stale-version protection
+# -----------------------------------------------------------------------------
+
+hm_source_path() {
+  readlink -f "${BASH_SOURCE[0]}"
+}
+
+hm_canonical_manager_version() {
+  if [[ ! -r "$HM_MANAGER_PATH" ]]; then
+    printf 'not-installed\n'
+    return 0
+  fi
+
+  local v=""
+  v="$(
+    sed -nE \
+      -e 's/^readonly HM_VERSION="([^"]+)".*/\1/p' \
+      -e 's/^readonly MANAGER_VERSION="([^"]+)".*/\1/p' \
+      "$HM_MANAGER_PATH" | head -1
+  )"
+  printf '%s\n' "${v:-unknown}"
+}
+
+hm_self_install() {
+  local src
+  src="$(hm_source_path)"
+
+  if [[ "$src" != "$HM_MANAGER_PATH" ]]; then
+    install -o root -g root -m 0755 "$src" "$HM_MANAGER_PATH"
+    hm_info "Installed harness-manager ${HM_VERSION} -> ${HM_MANAGER_PATH}"
+  else
+    chown root:root "$HM_MANAGER_PATH"
+    chmod 0755 "$HM_MANAGER_PATH"
+  fi
+}
+
+hm_begin_mutation() {
+  hm_require_root
+  hm_require_ubuntu_2404
+  hm_lock
+  hm_validate_managed_paths
+
+  # Critical recovery behavior:
+  # `sudo ./harness-manager repair` replaces a stale canonical manager BEFORE
+  # repair logic runs, so an old /usr/local/bin/harness-manager cannot keep
+  # reintroducing old bugs.
+  hm_self_install
+}
+
+# -----------------------------------------------------------------------------
+# Existing manager integration
+# -----------------------------------------------------------------------------
+
+hm_require_managers() {
+  [[ -x "$HM_NVM_MANAGER" ]] || \
+    hm_die "Missing ${HM_NVM_MANAGER}. Install nvm-manager first; this manager will not duplicate Node.js."
+  [[ -x "$HM_OLLAMA_MANAGER" ]] || \
+    hm_die "Missing ${HM_OLLAMA_MANAGER}. Install ollama-manager first; Harness uses Ollama as its AI provider."
+}
+
+hm_manager_status_line() {
+  local name="$1" path="$2" required="$3"
+  if [[ -x "$path" ]]; then
+    printf '%-20s INSTALLED  %s\n' "$name" "$path"
+  elif [[ "$required" == "yes" ]]; then
+    printf '%-20s MISSING    %s [REQUIRED]\n' "$name" "$path"
+  else
+    printf '%-20s NOT FOUND  %s\n' "$name" "$path"
+  fi
+}
+
+hm_prereqs() {
+  echo "=== Harness prerequisites ==="
+  hm_manager_status_line docker-manager "$HM_DOCKER_MANAGER" no
+  hm_manager_status_line gvm-manager "$HM_GVM_MANAGER" no
+  hm_manager_status_line miniconda-manager "$HM_MINICONDA_MANAGER" no
+  hm_manager_status_line nvm-manager "$HM_NVM_MANAGER" yes
+  hm_manager_status_line ollama-manager "$HM_OLLAMA_MANAGER" yes
+  echo
+  echo "Required integration:"
+  echo "  Node.js: nvm-manager -> dedicated '${HM_USER}' profile"
+  echo "  AI:      ollama-manager -> ${HM_OLLAMA_OPENAI}"
+  echo
+  echo "Independent/untouched:"
+  echo "  docker-manager, gvm-manager, miniconda-manager"
+}
+
+# -----------------------------------------------------------------------------
+# Service user / filesystem / config
+# -----------------------------------------------------------------------------
+
+hm_user_exists() {
+  id "$HM_USER" >/dev/null 2>&1
+}
+
+hm_ensure_user() {
+  if ! hm_user_exists; then
+    if getent group "$HM_GROUP" >/dev/null 2>&1; then
+      useradd \
+        --system \
+        --gid "$HM_GROUP" \
+        --create-home \
+        --home-dir "$HM_STATE" \
+        --shell /usr/sbin/nologin \
+        "$HM_USER"
+    else
+      useradd \
+        --system \
+        --user-group \
+        --create-home \
+        --home-dir "$HM_STATE" \
+        --shell /usr/sbin/nologin \
+        "$HM_USER"
+    fi
+    hm_info "Created ${HM_USER}:${HM_GROUP} service identity."
+  fi
+
+  local home shell primary
+  home="$(getent passwd "$HM_USER" | awk -F: '{print $6}')"
+  shell="$(getent passwd "$HM_USER" | awk -F: '{print $7}')"
+  primary="$(id -gn "$HM_USER")"
+
+  [[ "$home" == "$HM_STATE" ]] || usermod -d "$HM_STATE" "$HM_USER"
+  [[ "$shell" == "/usr/sbin/nologin" ]] || usermod -s /usr/sbin/nologin "$HM_USER"
+  [[ "$primary" == "$HM_GROUP" ]] || \
+    hm_die "Harness primary group is '${primary}', expected '${HM_GROUP}'."
+}
+
+hm_ensure_dirs() {
+  hm_ensure_user
+
+  install -d -o root -g root -m 0755 "$HM_BASE" "$(dirname "$HM_RUNNER")"
+  install -d -o root -g "$HM_GROUP" -m 0750 "$HM_CONFIG"
+
+  install -d -o "$HM_USER" -g "$HM_GROUP" -m 0750 \
+    "$HM_STATE" \
+    "$HM_DSH_HOME" \
+    "$HM_WORKSPACE" \
+    "$HM_CACHE" \
+    "$HM_NPM_CACHE" \
+
+  touch "$HM_TRUSTED" "$HM_PROJECTS"
+  chown root:"$HM_GROUP" "$HM_TRUSTED" "$HM_PROJECTS"
+  chmod 0640 "$HM_TRUSTED" "$HM_PROJECTS"
+}
+
+hm_write_env_if_missing() {
+  if [[ ! -f "$HM_ENV" ]]; then
+    cat >"$HM_ENV" <<EOF
+# Managed by harness-manager.
+HARNESS_PORT=${HM_DEFAULT_HARNESS_PORT}
+DSH_TELEMETRY_DISABLED=1
+DSH_PERMISSION_MODE=workspace-write
+NODE_ENV=production
+
+# Ollama's local OpenAI-compatible endpoint does not authenticate local calls,
+# but OpenAI-compatible clients may require a non-empty API-key value.
+OLLAMA_HARNESS_API_KEY=${HM_OLLAMA_DUMMY_KEY}
+EOF
+  fi
+
+  chown root:"$HM_GROUP" "$HM_ENV"
+  chmod 0640 "$HM_ENV"
+}
+
+hm_load_env() {
+  HARNESS_PORT="$HM_DEFAULT_HARNESS_PORT"
+  DSH_TELEMETRY_DISABLED="1"
+  DSH_PERMISSION_MODE="workspace-write"
+  NODE_ENV="production"
+  OLLAMA_HARNESS_API_KEY="$HM_OLLAMA_DUMMY_KEY"
+
+  if [[ -f "$HM_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$HM_ENV"
+  fi
+
+  [[ "$HARNESS_PORT" =~ ^[0-9]+$ ]] || hm_die "Invalid HARNESS_PORT in $HM_ENV"
+  (( HARNESS_PORT >= 1024 && HARNESS_PORT <= 65535 )) || \
+    hm_die "HARNESS_PORT must be between 1024 and 65535."
+}
+
+hm_cleanup_aiops_mapping() {
+  if getent group "$HM_GROUP" >/dev/null 2>&1; then
+    local members=""
+    members="$(getent group "$HM_GROUP" | awk -F: '{print $4}')"
+    if [[ ",${members}," == *",${HM_LEGACY_USER},"* ]]; then
+      gpasswd -d "$HM_LEGACY_USER" "$HM_GROUP" >/dev/null 2>&1 || true
+      hm_info "Removed legacy '${HM_LEGACY_USER}' membership from '${HM_GROUP}'."
+    fi
+  fi
+
+  [[ -f "$HM_PROJECTS" ]] || return 0
+  local p
+  while IFS= read -r p; do
+    [[ -n "$p" && "$p" != \#* && -d "$p" ]] || continue
+    setfacl -x "u:${HM_LEGACY_USER}" "$p" 2>/dev/null || true
+    setfacl -x "d:u:${HM_LEGACY_USER}" "$p" 2>/dev/null || true
+  done <"$HM_PROJECTS"
+}
+
+# -----------------------------------------------------------------------------
+# Existing NVM / Node runtime bridge
+# -----------------------------------------------------------------------------
+
+hm_root_nvm() {
+  env \
+    NVM_USER="root" \
+    NODE_DEFAULT="$HM_NODE_MAJOR" \
+    "$HM_NVM_MANAGER" "$@"
+}
+
+hm_root_default_node() {
+  printf '%s/node\n' "$HM_ROOT_NVM_DEFAULT"
+}
+
+hm_root_node_major() {
+  local node
+  node="$(hm_root_default_node)"
+  [[ -x "$node" ]] || return 1
+  "$node" -p 'process.versions.node.split(".")[0]'
+}
+
+hm_node_mount_unit() {
+  systemd-escape --path --suffix=mount "$HM_NODE_RUNTIME"
+}
+
+hm_node_source_runtime() {
+  local node real
+  node="$(hm_root_default_node)"
+  real="$(readlink -f "$node" 2>/dev/null || true)"
+  [[ -n "$real" && -x "$real" ]] || return 1
+
+  # /root/.nvm/versions/node/v24.x.x/bin/node -> version root
+  dirname "$(dirname "$real")"
+}
+
+hm_write_node_mount() {
+  hm_require_cmd systemd-escape
+
+  local source unit unit_file
+  source="$(hm_node_source_runtime)" || \
+    hm_die "Unable to resolve the existing root NVM Node runtime."
+  unit="$(hm_node_mount_unit)"
+  unit_file="/etc/systemd/system/${unit}"
+
+  case "$source" in
+    "$HM_ROOT_NVM_DIR"/versions/node/v*) ;;
+    *) hm_die "Refusing unexpected NVM Node source: $source" ;;
+  esac
+
+  install -d -o root -g root -m 0755 "$HM_NODE_RUNTIME"
+
+  # Stop an earlier bridge before rewriting it. This never stops/root-modifies
+  # the actual root NVM installation.
+  systemctl stop "$unit" 2>/dev/null || true
+  if mountpoint -q "$HM_NODE_RUNTIME"; then
+    umount "$HM_NODE_RUNTIME" 2>/dev/null || \
+      hm_die "Could not unmount stale Node runtime bridge: $HM_NODE_RUNTIME"
+  fi
+
+  cat >"$unit_file" <<EOF
+[Unit]
+Description=Read-only Node.js runtime bridge for DeepSeek Harness
+After=local-fs.target
+Before=${HM_SERVICE}
+
+[Mount]
+What=${source}
+Where=${HM_NODE_RUNTIME}
+Type=none
+Options=bind,ro,nosuid,nodev
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chown root:root "$unit_file"
+  chmod 0644 "$unit_file"
+
+  systemctl daemon-reload
+  systemctl enable "$unit" >/dev/null
+  systemctl start "$unit"
+
+  mountpoint -q "$HM_NODE_RUNTIME" || hm_die "Node runtime bridge did not mount."
+  [[ -x "$HM_NODE" && -x "$HM_NPM" ]] || \
+    hm_die "Node/npm are missing from the read-only runtime bridge."
+
+  local source_real target_real
+  source_real="$(readlink -f "${source}/bin/node")"
+  target_real="$(readlink -f "$HM_NODE")"
+  [[ -n "$source_real" && -n "$target_real" ]] || hm_die "Cannot resolve Node bridge."
+}
+
+hm_node_major() {
+  [[ -x "$HM_NODE" ]] || return 1
+  "$HM_NODE" -p 'process.versions.node.split(".")[0]'
+}
+
+hm_ensure_node() {
+  hm_require_managers
+
+  # nvm-manager itself can be installed while root's NVM runtime is not yet
+  # provisioned. In that case use the EXISTING manager to create the one root
+  # runtime, not a separate Harness NVM tree.
+  if [[ ! -s "${HM_ROOT_NVM_DIR}/nvm.sh" ]]; then
+    hm_log "Root NVM runtime is not installed; provisioning it through existing nvm-manager"
+    hm_root_nvm install
+  else
+    hm_log "Verifying existing root NVM runtime"
+    hm_root_nvm repair
+  fi
+
+  if [[ ! -x "$(hm_root_default_node)" || "$(hm_root_node_major 2>/dev/null || true)" != "$HM_NODE_MAJOR" ]]; then
+    hm_log "Selecting Node ${HM_NODE_MAJOR} in the existing root NVM installation"
+    hm_root_nvm set-default "$HM_NODE_MAJOR"
+  fi
+
+  hm_root_nvm verify
+  [[ "$(hm_root_node_major)" == "$HM_NODE_MAJOR" ]] || \
+    hm_die "Root NVM default must be Node ${HM_NODE_MAJOR}.x."
+
+  hm_write_node_mount
+
+  local path
+  path="$(hm_path_value)"
+  runuser -u "$HM_USER" -- env -i \
+    HOME="$HM_STATE" \
+    USER="$HM_USER" \
+    LOGNAME="$HM_USER" \
+    LANG="C.UTF-8" \
+    LC_ALL="C.UTF-8" \
+    PATH="$path" \
+    node --version >/dev/null || \
+      hm_die "Harness service user cannot execute the read-only Node runtime."
+
+  local npm_version
+  npm_version="$(hm_npm_version)" || hm_die "npm cannot run through the read-only Node bridge."
+
+  hm_info "Reusing Node $("$HM_NODE" --version) from existing root nvm-manager"
+  hm_info "Node bridge: $(hm_node_source_runtime) -> $HM_NODE_RUNTIME (read-only)"
+  hm_info "npm: ${npm_version}"
+}
+
+hm_update_node() {
+  hm_log "Updating the existing root NVM runtime through nvm-manager"
+  hm_root_nvm update
+  hm_root_nvm set-default "$HM_NODE_MAJOR"
+  hm_root_nvm verify
+  hm_write_node_mount
+}
+
+hm_path_value() {
+  local path="${HM_NODE_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  if [[ -x /opt/miniconda3/bin/python ]]; then
+    path="/opt/miniconda3/bin:${path}"
+  fi
+
+  printf '%s\n' "$path"
+}
+
+hm_run_as_user() {
+  local path
+  path="$(hm_path_value)"
+
+  runuser -u "$HM_USER" -- \
+    env -i \
+      HOME="$HM_STATE" \
+      USER="$HM_USER" \
+      LOGNAME="$HM_USER" \
+      SHELL="/bin/bash" \
+      LANG="C.UTF-8" \
+      LC_ALL="C.UTF-8" \
+      XDG_CACHE_HOME="$HM_CACHE" \
+      npm_config_cache="$HM_NPM_CACHE" \
+      npm_config_fund="false" \
+      npm_config_update_notifier="false" \
+      PATH="$path" \
+      "$@"
+}
+
+hm_npm_version() {
+  [[ -x "$HM_NPM" ]] || return 1
+  hm_run_as_user "$HM_NPM" --version
+}
+
+# -----------------------------------------------------------------------------
+# DeepSeek Harness npm package
+# -----------------------------------------------------------------------------
+
+hm_latest_dsh_version() {
+  hm_run_as_user "$HM_NPM" view @deepseek-ai/dsh version --json | \
+    python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+if isinstance(x,str) and x:
+    print(x)
+elif isinstance(x,list):
+    values=[v for v in x if isinstance(v,str) and v]
+    if values:
+        print(values[-1])
+    else:
+        raise SystemExit(1)
+else:
+    raise SystemExit(1)
+'
+}
+
+hm_package_version_at() {
+  local app="$1"
+  local pkg="${app}/node_modules/@deepseek-ai/dsh/package.json"
+  [[ -r "$pkg" ]] || return 1
+  "$HM_NODE" -e "console.log(require(process.argv[1]).version)" "$pkg"
+}
+
+hm_dsh_version() {
+  [[ -x "$HM_DSH" ]] || return 1
+  hm_run_as_user "$HM_DSH" --version
+}
+
+hm_make_runtime_readable() {
+  local app="$1"
+  [[ -d "$app" ]] || hm_die "Runtime directory missing: $app"
+
+  chown -R root:root "$app"
+  chmod 0755 "$HM_BASE" "$app"
+  chmod -R a+rX,go-w "$app"
+
+  local dsh="${app}/node_modules/.bin/dsh"
+  [[ -e "$dsh" ]] || hm_die "dsh launcher missing: $dsh"
+
+  local real=""
+  real="$(readlink -f "$dsh" 2>/dev/null || true)"
+  [[ -n "$real" && -f "$real" ]] || hm_die "Broken dsh launcher: $dsh"
+  chmod 0755 "$real"
+
+  if ! runuser -u "$HM_USER" -- test -x "$dsh"; then
+    namei -l "$dsh" >&2 || true
+    hm_die "Service user '${HM_USER}' cannot execute $dsh"
+  fi
+}
+
+hm_find_node_pty_dirs() {
+  local app="$1"
+  find "$app/node_modules" \
+    -type f \
+    -path '*/node-pty/package.json' \
+    -print0 2>/dev/null | \
+  while IFS= read -r -d '' pkg; do
+    dirname "$pkg"
+  done
+}
+
+hm_test_node_pty_dir() {
+  local dir="$1"
+
+  # Do not merely require() node-pty. Spawn a real PTY shell so this verifies:
+  #   - pty.node loads
+  #   - the platform spawn-helper is executable
+  #   - PTY creation works for the unprivileged Harness service account
+  hm_run_as_user "$HM_NODE" - "$dir" <<'NODE'
+const ptyDir = process.argv[2]
+const pty = require(ptyDir)
+
+if (!pty || typeof pty.spawn !== 'function') process.exit(2)
+
+let output = ''
+let finished = false
+
+const child = pty.spawn('/bin/sh', ['-c', 'printf HARNESS_PTY_OK'], {
+  name: 'xterm-256color',
+  cols: 80,
+  rows: 24,
+  cwd: '/tmp',
+  env: {
+    PATH: '/usr/local/bin:/usr/bin:/bin',
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+  },
+})
+
+const timer = setTimeout(() => {
+  if (!finished) {
+    try { child.kill() } catch {}
+    process.exit(4)
+  }
+}, 5000)
+
+child.onData((data) => {
+  output += data
+})
+
+child.onExit(({ exitCode }) => {
+  finished = true
+  clearTimeout(timer)
+  if (exitCode !== 0 || !output.includes('HARNESS_PTY_OK')) process.exit(5)
+  process.exit(0)
+})
+NODE
+}
+
+hm_validate_node_pty() {
+  local app="$1"
+  mapfile -t pty_dirs < <(hm_find_node_pty_dirs "$app")
+
+  ((${#pty_dirs[@]} > 0)) || hm_die "node-pty dependency not found in Harness runtime."
+
+  local dir
+  for dir in "${pty_dirs[@]}"; do
+    if ! hm_test_node_pty_dir "$dir" >/dev/null 2>&1; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+hm_validate_spawn_helpers() {
+  local app="$1"
+  mapfile -t pty_dirs < <(hm_find_node_pty_dirs "$app")
+  ((${#pty_dirs[@]} > 0)) || return 1
+
+  local dir helper found=0
+  for dir in "${pty_dirs[@]}"; do
+    for helper in \
+      "${dir}/prebuilds/linux-x64/spawn-helper" \
+      "${dir}/prebuilds/linux-arm64/spawn-helper" \
+      "${dir}/build/Release/spawn-helper"; do
+      if [[ -e "$helper" ]]; then
+        found=1
+        [[ -x "$helper" ]] || return 1
+      fi
+    done
+  done
+
+  # node-pty may package helpers differently on a future platform/release.
+  # If no helper exists at all, don't invent a failure here; dsh Web preflight
+  # remains the final authoritative runtime test.
+  return 0
+}
+
+hm_rebuild_reviewed_install_scripts() {
+  local stage="$1"
+
+  hm_warn "Re-running reviewed DeepSeek/native install scripts."
+  (
+    cd "$stage"
+    hm_run_as_user "$HM_NPM" rebuild \
+      node-pty \
+      koffi \
+      @deepseek-ai/dsh-subprocess-local \
+      --foreground-scripts
+  )
+
+  hm_validate_node_pty "$stage" || hm_die "node-pty is unusable after reviewed-script rebuild."
+  hm_validate_spawn_helpers "$stage" || hm_die "node-pty spawn-helper is not executable after rebuild."
+}
+
+hm_rebuild_node_pty_in_stage() {
+  local stage="$1"
+  hm_warn "Native/subprocess runtime validation failed; rebuilding reviewed dependencies."
+
+  hm_rebuild_reviewed_install_scripts "$stage" || {
+    echo "=== native runtime diagnostics ===" >&2
+    local dir
+    while IFS= read -r dir; do
+      echo "node-pty: $dir" >&2
+      find "$dir" -type f \( -name 'pty.node' -o -name 'spawn-helper' \) -ls >&2 2>/dev/null || true
+    done < <(hm_find_node_pty_dirs "$stage")
+    echo "=== end native runtime diagnostics ===" >&2
+    hm_die "Reviewed native/subprocess install scripts are still unusable."
+  }
+}
+
+hm_free_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+
+hm_preflight_app() {
+  local app="$1"
+  local dsh="${app}/node_modules/.bin/dsh"
+  [[ -x "$dsh" ]] || hm_die "Preflight binary is not executable: $dsh"
+
+  local preflight_home log_file port pid ok=0
+  preflight_home="$(mktemp -d "${HM_STATE}/preflight.XXXXXX")"
+  chown "$HM_USER":"$HM_GROUP" "$preflight_home"
+  chmod 0750 "$preflight_home"
+
+  log_file="$(mktemp /tmp/deepseek-harness-preflight.XXXXXX.log)"
+  port="$(hm_free_port)"
+
+  hm_log "Preflighting Harness Web as '${HM_USER}' on 127.0.0.1:${port}"
+
+  local path
+  path="$(hm_path_value)"
+
+  setsid runuser -u "$HM_USER" -- \
+    env -i \
+      HOME="$HM_STATE" \
+      USER="$HM_USER" \
+      LOGNAME="$HM_USER" \
+      SHELL="/bin/bash" \
+      LANG="C.UTF-8" \
+      LC_ALL="C.UTF-8" \
+      DSH_HOME="$preflight_home" \
+      DSH_TELEMETRY_DISABLED=1 \
+      DSH_PERMISSION_MODE=workspace-write \
+      XDG_CACHE_HOME="$HM_CACHE" \
+      PATH="$path" \
+      "$dsh" web --host 127.0.0.1 --port "$port" \
+      >"$log_file" 2>&1 &
+  pid=$!
+
+  local i
+  for i in $(seq 1 80); do
+    if curl -fsS --connect-timeout 1 --max-time 2 \
+        "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  kill -TERM -- "-${pid}" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  if [[ "$ok" -ne 1 ]]; then
+    echo >&2
+    echo "=== DIRECT HARNESS PREFLIGHT FAILURE ===" >&2
+    cat "$log_file" >&2 || true
+    echo "=== END PREFLIGHT FAILURE ===" >&2
+    rm -rf "$preflight_home"
+    rm -f "$log_file"
+    return 1
+  fi
+
+  rm -rf "$preflight_home"
+  rm -f "$log_file"
+  hm_info "Direct Harness Web preflight: OK"
+}
+
+hm_stage_dsh() {
+  local requested="${1:-latest}"
+  local version="$requested"
+
+  HM_STAGE_PATH=""
+  HM_STAGE_VERSION=""
+
+  if [[ "$version" == "latest" || -z "$version" ]]; then
+    version="$(hm_latest_dsh_version)"
+  fi
+  [[ -n "$version" ]] || hm_die "Unable to resolve @deepseek-ai/dsh version."
+
+  local stage="${HM_BASE}/.staging-${version//[^A-Za-z0-9._-]/_}-$$-${RANDOM}"
+  install -d -o "$HM_USER" -g "$HM_GROUP" -m 0755 "$stage"
+
+  cat >"${stage}/package.json" <<EOF
+{
+  "name": "deepseek-harness-managed-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@deepseek-ai/dsh": "${version}"
+  },
+  "allowScripts": {
+    "node-pty": true,
+    "koffi": true,
+    "@deepseek-ai/dsh-subprocess-local": true,
+    "@google/genai": false,
+    "protobufjs": false,
+    "node-addon-require-builtin": false
+  }
+}
+EOF
+  chown "$HM_USER":"$HM_GROUP" "${stage}/package.json"
+  chmod 0644 "${stage}/package.json"
+
+  hm_log "Installing @deepseek-ai/dsh@${version} into staging"
+
+  (
+    cd "$stage"
+    hm_run_as_user "$HM_NPM" install \
+      --omit=dev \
+      --include=optional \
+      --foreground-scripts \
+      --no-fund \
+      --no-audit
+  ) || {
+    rm -rf "$stage"
+    hm_die "npm installation failed for @deepseek-ai/dsh@${version}."
+  }
+
+  local dsh="${stage}/node_modules/.bin/dsh"
+  [[ -x "$dsh" ]] || {
+    namei -l "$dsh" >&2 2>/dev/null || true
+    rm -rf "$stage"
+    hm_die "Staged package does not contain an executable dsh launcher."
+  }
+
+  if ! hm_validate_node_pty "$stage" || ! hm_validate_spawn_helpers "$stage"; then
+    hm_rebuild_node_pty_in_stage "$stage"
+  else
+    hm_info "node-pty native runtime / spawn-helper: OK"
+  fi
+
+  local reported=""
+  reported="$(hm_run_as_user "$dsh" --version 2>/dev/null || true)"
+  [[ -n "$reported" ]] || {
+    namei -l "$dsh" >&2 || true
+    rm -rf "$stage"
+    hm_die "Staged dsh cannot execute as '${HM_USER}'."
+  }
+
+  hm_info "Staged dsh reports: $reported"
+
+  if ! hm_preflight_app "$stage"; then
+    rm -rf "$stage"
+    hm_die "Staged Harness failed Web preflight. Active installation was not changed."
+  fi
+
+  HM_STAGE_PATH="$stage"
+  HM_STAGE_VERSION="$version"
+}
+
+hm_activate_stage() {
+  [[ -n "$HM_STAGE_PATH" && -d "$HM_STAGE_PATH" ]] || hm_die "No valid staged Harness runtime."
+  [[ -n "$HM_STAGE_VERSION" ]] || hm_die "Staged Harness version is unset."
+
+  chown -R root:root "$HM_STAGE_PATH"
+  chmod 0755 "$HM_STAGE_PATH"
+  chmod -R a+rX,go-w "$HM_STAGE_PATH"
+
+  rm -rf "$HM_PREVIOUS"
+  if [[ -d "$HM_APP" ]]; then
+    mv "$HM_APP" "$HM_PREVIOUS"
+  fi
+
+  mv "$HM_STAGE_PATH" "$HM_APP"
+
+  printf '%s\n' "$HM_STAGE_VERSION" >"$HM_INSTALLED_VERSION_FILE"
+  chown root:root "$HM_INSTALLED_VERSION_FILE"
+  chmod 0644 "$HM_INSTALLED_VERSION_FILE"
+
+  hm_make_runtime_readable "$HM_APP"
+
+  if ! hm_dsh_version >/dev/null 2>&1; then
+    hm_warn "Activated runtime failed service-user execution; rolling back."
+    rm -rf "$HM_APP"
+    [[ -d "$HM_PREVIOUS" ]] && mv "$HM_PREVIOUS" "$HM_APP"
+    hm_die "Harness activation failed."
+  fi
+
+  HM_STAGE_PATH=""
+  HM_STAGE_VERSION=""
+}
+
+hm_install_dsh() {
+  local version="${1:-latest}"
+  hm_stage_dsh "$version"
+  hm_activate_stage
+}
+
+hm_repair_app() {
+  if [[ ! -d "$HM_APP" || ! -e "$HM_DSH" ]]; then
+    hm_warn "Canonical Harness runtime is missing; installing latest."
+    hm_install_dsh latest
+    return 0
+  fi
+
+  hm_make_runtime_readable "$HM_APP"
+
+  local current=""
+  current="$(hm_package_version_at "$HM_APP" 2>/dev/null || true)"
+
+  if ! hm_dsh_version >/dev/null 2>&1; then
+    hm_warn "dsh cannot execute as '${HM_USER}'; reinstalling ${current:-latest}."
+    hm_install_dsh "${current:-latest}"
+    return 0
+  fi
+
+  if ! hm_validate_node_pty "$HM_APP" || ! hm_validate_spawn_helpers "$HM_APP"; then
+    hm_warn "Native/subprocess runtime is incomplete; atomically reinstalling ${current:-latest}."
+    hm_install_dsh "${current:-latest}"
+    return 0
+  fi
+
+  if ! hm_preflight_app "$HM_APP"; then
+    hm_warn "Harness Web preflight failed; atomically reinstalling ${current:-latest}."
+    hm_install_dsh "${current:-latest}"
+    return 0
+  fi
+}
+
+hm_cleanup_obsolete_harness_layouts() {
+  # Old harness-manager-owned duplicate runtimes only.
+  # The shared root NVM source is never modified here.
+  mountpoint -q "$HM_NODE_RUNTIME" ||     hm_die "Refusing obsolete-runtime cleanup until the read-only Node bridge is mounted."
+
+  if [[ -d "${HM_STATE}/.nvm" ]]; then
+    hm_warn "Removing obsolete Harness-specific duplicate NVM runtime: ${HM_STATE}/.nvm"
+    rm -rf -- "${HM_STATE}/.nvm"
+  fi
+
+  local old
+  for old in \
+    "${HM_BASE}/node" \
+    "${HM_BASE}/node_modules" \
+    "${HM_BASE}/bin"; do
+    if [[ -e "$old" ]]; then
+      hm_warn "Removing obsolete Harness runtime: $old"
+      rm -rf -- "$old"
+    fi
+  done
+
+  rm -f \
+    "${HM_BASE}/package.json" \
+    "${HM_BASE}/package-lock.json" \
+    "${HM_BASE}/npm-shrinkwrap.json" \
+    2>/dev/null || true
+}
+
+# -----------------------------------------------------------------------------
+# Ollama provider
+# -----------------------------------------------------------------------------
+
+hm_ollama_local_health() {
+  curl -fsS --connect-timeout 2 --max-time 8 \
+    "${HM_OLLAMA_LOCAL}/api/tags" >/dev/null
+}
+
+hm_ollama_openai_health() {
+  curl -fsS --connect-timeout 2 --max-time 8 \
+    "${HM_OLLAMA_OPENAI}/models" >/dev/null
+}
+
+hm_require_ollama_runtime() {
+  [[ -x "$HM_OLLAMA_MANAGER" ]] || hm_die "ollama-manager is missing."
+  systemctl is-active --quiet ollama.service || \
+    hm_die "ollama.service is not active. Run: sudo ollama-manager start"
+  hm_ollama_local_health || hm_die "Ollama local API is unavailable at $HM_OLLAMA_LOCAL"
+  hm_ollama_openai_health || hm_die "Ollama /v1 endpoint is unavailable at $HM_OLLAMA_OPENAI"
+}
+
+hm_extract_ollama_model_ids() {
+  local mode="$1" file="$2"
+
+  python3 - "$mode" "$file" <<'PY'
+import json
+import sys
+
+mode, filename = sys.argv[1], sys.argv[2]
+
+try:
+    with open(filename, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"invalid Ollama model-list JSON: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+
+if not isinstance(payload, dict):
+    raise SystemExit(0)
+
+if mode == "native":
+    items = payload.get("models")
+    keys = ("model", "name")
+elif mode == "openai":
+    items = payload.get("data")
+    keys = ("id",)
+else:
+    raise SystemExit(2)
+
+# `null`, a missing key, or any non-list value means "no discovered models",
+# not a Python exception.
+if not isinstance(items, list):
+    raise SystemExit(0)
+
+seen = set()
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    ident = None
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            ident = value.strip()
+            break
+    if ident and ident not in seen:
+        seen.add(ident)
+        print(ident)
+PY
+}
+
+hm_fetch_ollama_model_ids() {
+  local mode="$1" url="$2"
+  local tmp output=""
+
+  tmp="$(mktemp /tmp/harness-ollama-models.XXXXXX.json)"
+  if ! curl -fsS --connect-timeout 2 --max-time 10 "$url" -o "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if ! output="$(hm_extract_ollama_model_ids "$mode" "$tmp")"; then
+    hm_warn "Ignoring malformed model-discovery response from ${url}."
+    rm -f "$tmp"
+    return 1
+  fi
+
+  rm -f "$tmp"
+  printf '%s' "$output"
+}
+
+hm_ollama_model_ids() {
+  local models=""
+
+  # Ollama's native /api/tags endpoint is the authoritative model inventory.
+  # Cloud proxy models registered with `ollama pull ...:cloud` appear in the
+  # local proxy inventory without downloading their weights.
+  models="$(hm_fetch_ollama_model_ids native "${HM_OLLAMA_LOCAL}/api/tags" || true)"
+  if [[ -n "$models" ]]; then
+    printf '%s\n' "$models"
+    return 0
+  fi
+
+  # OpenAI compatibility is a fallback only. Some valid deployments return
+  # {"data": null}; treat that as an empty list rather than iterating None.
+  models="$(hm_fetch_ollama_model_ids openai "${HM_OLLAMA_OPENAI}/models" || true)"
+  if [[ -n "$models" ]]; then
+    printf '%s\n' "$models"
+  fi
+
+  return 0
+}
+
+hm_settings_file() {
+  printf '%s/settings.yaml\n' "$HM_DSH_HOME"
+}
+
+hm_configure_ollama() {
+  hm_require_ollama_runtime
+
+  local file backup=""
+  file="$(hm_settings_file)"
+
+  if [[ -s "$file" ]]; then
+    backup="${file}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -a "$file" "$backup"
+  fi
+
+  mapfile -t models < <(hm_ollama_model_ids)
+
+  python3 - "$file" "$HM_OLLAMA_OPENAI" "${models[@]}" <<'PY'
+from pathlib import Path
+import os,sys,tempfile,yaml
+
+path=Path(sys.argv[1])
+base=sys.argv[2]
+models=sys.argv[3:]
+
+if path.exists() and path.stat().st_size:
+    data=yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+else:
+    data={}
+
+if not isinstance(data,dict):
+    raise SystemExit("settings.yaml root must be a mapping")
+
+section=data.setdefault("llm-pi-ai",{})
+if not isinstance(section,dict):
+    raise SystemExit("llm-pi-ai must be a mapping")
+
+providers=section.setdefault("providers",{})
+if not isinstance(providers,dict):
+    raise SystemExit("llm-pi-ai.providers must be a mapping")
+
+route=providers.get("ollama") or {}
+if not isinstance(route,dict):
+    raise SystemExit("existing ollama provider must be a mapping")
+
+route["apiKeyEnv"]="OLLAMA_HARNESS_API_KEY"
+route["api"]="openai-completions"
+route["baseURL"]=base
+
+if models:
+    route["models"]=[{"id":m} for m in models]
+else:
+    route.pop("models",None)
+
+providers["ollama"]=route
+
+path.parent.mkdir(parents=True,exist_ok=True)
+fd,tmp=tempfile.mkstemp(prefix=".settings.",suffix=".yaml",dir=str(path.parent))
+try:
+    with os.fdopen(fd,"w",encoding="utf-8") as fh:
+        yaml.safe_dump(data,fh,sort_keys=False,allow_unicode=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp,0o600)
+    os.replace(tmp,path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PY
+
+  chown "$HM_USER":"$HM_GROUP" "$file"
+  chmod 0600 "$file"
+
+  hm_info "Harness provider configured: ollama -> ${HM_OLLAMA_OPENAI}"
+  if ((${#models[@]} > 0)); then
+    hm_info "Discovered ${#models[@]} Ollama model(s)."
+  else
+    hm_warn "No Ollama models are currently registered; provider route is configured without a pinned model list."
+  fi
+  if [[ -n "$backup" ]]; then
+    hm_info "Previous settings backed up to: $backup"
+  fi
+
+  return 0
+}
+
+hm_ollama_use() {
+  hm_begin_mutation
+  hm_prepare_common
+
+  local model="${1:-}"
+  [[ -n "$model" && "$model" != *[$'\n\r\t ']* ]] || \
+    hm_die "Usage: harness-manager ollama-use MODEL"
+
+  "$HM_OLLAMA_MANAGER" register-cloud "$model"
+  hm_configure_ollama
+
+  if systemctl is-active --quiet "$HM_SERVICE" 2>/dev/null; then
+    hm_restart_checked
+  fi
+}
+
+hm_ollama_status() {
+  echo "=== Ollama provider ==="
+  echo "Local API:  $HM_OLLAMA_LOCAL"
+  echo "OpenAI API: $HM_OLLAMA_OPENAI"
+  hm_ollama_local_health && echo "Local API health:  OK" || echo "Local API health:  FAILED"
+  hm_ollama_openai_health && echo "OpenAI API health: OK" || echo "OpenAI API health: FAILED"
+
+  local file
+  file="$(hm_settings_file)"
+  if [[ -f "$file" ]]; then
+    python3 - "$file" <<'PY'
+from pathlib import Path
+import sys,yaml
+data=yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8")) or {}
+route=((data.get("llm-pi-ai") or {}).get("providers") or {}).get("ollama")
+if not isinstance(route,dict):
+    print("Harness route: NOT CONFIGURED")
+else:
+    print("Harness route: ollama")
+    print("Protocol:",route.get("api",""))
+    print("Base URL:",route.get("baseURL",""))
+    models=route.get("models")
+    if isinstance(models,list):
+        print("Models:")
+        for m in models:
+            print("  -",m.get("id") if isinstance(m,dict) else m)
+    else:
+        print("Models: endpoint discovery / not pinned")
+PY
+  else
+    echo "Harness route: NOT CONFIGURED"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Projects / ACLs
+# -----------------------------------------------------------------------------
+
+hm_project_list_raw() {
+  [[ -f "$HM_PROJECTS" ]] || return 0
+  sed '/^[[:space:]]*$/d; /^[[:space:]]*#/d' "$HM_PROJECTS"
+}
+
+hm_validate_project() {
+  local p="$1"
+  [[ "$p" == /* ]] || return 1
+  [[ "$p" != *[$'\n\r\t']* ]] || return 1
+  [[ -d "$p" && ! -L "$p" ]] || return 1
+  [[ "$(readlink -f -- "$p")" == "$p" ]] || return 1
+
+  case "$p" in
+    /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+      return 1 ;;
+  esac
+}
+
+hm_grant_project_acl() {
+  local p="$1"
+
+  setfacl -R -m "u:${HM_USER}:rwX" "$p"
+
+  while IFS= read -r -d '' dir; do
+    setfacl -m "d:u:${HM_USER}:rwx" "$dir"
+  done < <(find "$p" -type d -print0)
+
+  setfacl -x "u:${HM_LEGACY_USER}" "$p" 2>/dev/null || true
+  setfacl -x "d:u:${HM_LEGACY_USER}" "$p" 2>/dev/null || true
+}
+
+hm_remove_project_acl() {
+  local p="$1"
+  [[ -d "$p" ]] || return 0
+
+  setfacl -R -x "u:${HM_USER}" "$p" 2>/dev/null || true
+  while IFS= read -r -d '' dir; do
+    setfacl -x "d:u:${HM_USER}" "$dir" 2>/dev/null || true
+  done < <(find "$p" -type d -print0 2>/dev/null)
+}
+
+hm_project_add() {
+  hm_begin_mutation
+  hm_prepare_common
+
+  local p="${1:-}"
+  [[ -n "$p" ]] || hm_die "Usage: harness-manager project-add /absolute/path"
+  p="$(readlink -f -- "$p" 2>/dev/null || true)"
+  hm_validate_project "$p" || hm_die "Invalid project path."
+
+  grep -Fxq "$p" "$HM_PROJECTS" 2>/dev/null || printf '%s\n' "$p" >>"$HM_PROJECTS"
+  sort -u -o "$HM_PROJECTS" "$HM_PROJECTS"
+  chown root:"$HM_GROUP" "$HM_PROJECTS"
+  chmod 0640 "$HM_PROJECTS"
+
+  hm_log "Granting Harness read/write ACLs to $p"
+  hm_grant_project_acl "$p"
+  hm_cleanup_aiops_mapping
+
+  if [[ -x "$HM_DSH" ]]; then
+    hm_write_runner
+    hm_write_service
+    if systemctl is-active --quiet "$HM_SERVICE" 2>/dev/null; then
+      hm_restart_checked
+    fi
+  fi
+
+  hm_info "Project enabled: $p"
+}
+
+hm_project_remove() {
+  hm_begin_mutation
+  hm_prepare_common
+
+  local p="${1:-}"
+  [[ -n "$p" ]] || hm_die "Usage: harness-manager project-remove /absolute/path"
+  p="$(readlink -f -- "$p" 2>/dev/null || printf '%s' "$p")"
+
+  local tmp
+  tmp="$(mktemp "${HM_CONFIG}/projects.XXXXXX")"
+  grep -Fvx "$p" "$HM_PROJECTS" >"$tmp" || true
+  install -o root -g "$HM_GROUP" -m 0640 "$tmp" "$HM_PROJECTS"
+  rm -f "$tmp"
+
+  hm_remove_project_acl "$p"
+
+  if [[ -x "$HM_DSH" ]]; then
+    hm_write_runner
+    hm_write_service
+    if systemctl is-active --quiet "$HM_SERVICE" 2>/dev/null; then
+      hm_restart_checked
+    fi
+  fi
+
+  hm_info "Project authorization removed; project files were not deleted: $p"
+}
+
+hm_projects() {
+  echo "=== Harness projects ==="
+  local n=0 p
+
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    ((n += 1))
+    if [[ -d "$p" ]]; then
+      printf '%2d. %s\n' "$n" "$p"
+    else
+      printf '%2d. %s [MISSING]\n' "$n" "$p"
+    fi
+  done < <(hm_project_list_raw)
+
+  ((n > 0)) || echo "(none)"
+}
+
+hm_project_check() {
+  hm_require_root
+
+  local p="${1:-}"
+  [[ -n "$p" ]] || hm_die "Usage: harness-manager project-check /absolute/path"
+  p="$(readlink -f -- "$p" 2>/dev/null || true)"
+  [[ -d "$p" ]] || hm_die "Project does not exist."
+
+  runuser -u "$HM_USER" -- test -r "$p" || hm_die "Harness cannot read $p"
+  runuser -u "$HM_USER" -- test -w "$p" || hm_die "Harness cannot write $p"
+
+  echo "Harness read/write: OK"
+  getfacl -cp "$p" | sed -n '1,40p'
+}
+
+# -----------------------------------------------------------------------------
+# Trusted public host authorities
+# -----------------------------------------------------------------------------
+
+hm_validate_authority() {
+  local v="$1"
+  [[ -n "$v" ]] || return 1
+  [[ "$v" != *"://"* && "$v" != */* && "$v" != *[$' \t\n\r']* ]] || return 1
+  [[ "$v" =~ ^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9._-]+)(:[0-9]{1,5})?$ ]]
+}
+
+hm_trusted_list() {
+  [[ -f "$HM_TRUSTED" ]] || return 0
+  sed '/^[[:space:]]*$/d; /^[[:space:]]*#/d' "$HM_TRUSTED"
+}
+
+hm_trusted_add() {
+  hm_begin_mutation
+  hm_prepare_common
+
+  local authority="${1:-}"
+  hm_validate_authority "$authority" || \
+    hm_die "Usage: harness-manager trusted-add HOST[:PORT] (no scheme/path)"
+
+  grep -Fxq "$authority" "$HM_TRUSTED" 2>/dev/null || printf '%s\n' "$authority" >>"$HM_TRUSTED"
+  sort -u -o "$HM_TRUSTED" "$HM_TRUSTED"
+  chown root:"$HM_GROUP" "$HM_TRUSTED"
+  chmod 0640 "$HM_TRUSTED"
+
+  if [[ -x "$HM_DSH" ]]; then
+    hm_write_runner
+    hm_write_service
+    if systemctl is-active --quiet "$HM_SERVICE" 2>/dev/null; then
+      hm_restart_checked
+    fi
+  fi
+
+  hm_info "Trusted host authority configured: $authority"
+}
+
+hm_trusted_remove() {
+  hm_begin_mutation
+  hm_prepare_common
+
+  local authority="${1:-}"
+  [[ -n "$authority" ]] || hm_die "Usage: harness-manager trusted-remove HOST[:PORT]"
+
+  local tmp
+  tmp="$(mktemp "${HM_CONFIG}/trusted-hosts.XXXXXX")"
+  grep -Fvx "$authority" "$HM_TRUSTED" >"$tmp" || true
+  install -o root -g "$HM_GROUP" -m 0640 "$tmp" "$HM_TRUSTED"
+  rm -f "$tmp"
+
+  if [[ -x "$HM_DSH" ]]; then
+    hm_write_runner
+    hm_write_service
+    if systemctl is-active --quiet "$HM_SERVICE" 2>/dev/null; then
+      hm_restart_checked
+    fi
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Runner / systemd
+# -----------------------------------------------------------------------------
+
+hm_write_runner() {
+  hm_load_env
+  [[ -x "$HM_DSH" ]] || hm_die "Cannot create runner; dsh is missing: $HM_DSH"
+
+  local path
+  path="$(hm_path_value)"
+
+  cat >"$HM_RUNNER" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=\$'\\n\\t'
+umask 027
+
+DSH_BIN="${HM_DSH}"
+TRUSTED_FILE="${HM_TRUSTED}"
+
+: "\${HARNESS_PORT:=${HM_DEFAULT_HARNESS_PORT}}"
+
+[[ -x "\$DSH_BIN" ]] || {
+  echo "[ERROR] Harness binary missing or not executable: \$DSH_BIN" >&2
+  exit 1
+}
+
+args=(web --host 127.0.0.1 --port "\$HARNESS_PORT")
+
+if [[ -f "\$TRUSTED_FILE" ]]; then
+  while IFS= read -r authority; do
+    [[ -n "\$authority" && "\$authority" != \\#* ]] || continue
+    args+=(--trusted-host "\$authority")
+  done <"\$TRUSTED_FILE"
+fi
+
+exec env \
+  HOME="${HM_STATE}" \
+  DSH_HOME="${HM_DSH_HOME}" \
+  XDG_CACHE_HOME="${HM_CACHE}" \
+  PATH="${path}" \
+  "\$DSH_BIN" "\${args[@]}"
+EOF
+
+  chown root:root "$HM_RUNNER"
+  chmod 0755 "$HM_RUNNER"
+}
+
+hm_verify_runner() {
+  [[ -x "$HM_RUNNER" ]] || hm_die "Harness runner missing: $HM_RUNNER"
+  grep -Fq "DSH_BIN=\"${HM_DSH}\"" "$HM_RUNNER" || \
+    hm_die "Harness runner points to a stale dsh path."
+}
+
+hm_write_service() {
+  hm_verify_runner
+
+  local tmp
+  tmp="$(mktemp /tmp/deepseek-harness.service.XXXXXX)"
+
+  cat >"$tmp" <<EOF
+[Unit]
+Description=DeepSeek Harness Web
+Documentation=https://github.com/deepseek-ai/deepseek-harness
+After=network-online.target ollama.service $(hm_node_mount_unit)
+Wants=network-online.target ollama.service
+Requires=$(hm_node_mount_unit)
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=${HM_USER}
+Group=${HM_GROUP}
+WorkingDirectory=${HM_WORKSPACE}
+
+EnvironmentFile=${HM_ENV}
+ExecStart=${HM_RUNNER}
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+
+UMask=0027
+LimitNOFILE=65535
+TasksMax=8192
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+
+# Harness uses node-pty; device isolation that hides PTYs is intentionally not enabled.
+ReadWritePaths=${HM_STATE}
+EOF
+
+  local p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    printf 'ReadWritePaths=%s\n' "$p" >>"$tmp"
+  done < <(hm_project_list_raw)
+
+  cat >>"$tmp" <<'EOF'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  install -o root -g root -m 0644 "$tmp" "$HM_SERVICE_FILE"
+  rm -f "$tmp"
+
+  systemctl daemon-reload
+}
+
+hm_stop_restart_loop() {
+  systemctl stop "$HM_SERVICE" 2>/dev/null || true
+  systemctl reset-failed "$HM_SERVICE" 2>/dev/null || true
+}
+
+hm_health() {
+  hm_load_env
+  curl -fsS --connect-timeout 2 --max-time 5 \
+    "http://127.0.0.1:${HARNESS_PORT}/" >/dev/null
+}
+
+hm_wait_health() {
+  local i
+  for i in $(seq 1 60); do
+    if hm_health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+hm_service_diagnostics() {
+  echo >&2
+  echo "=== ${HM_SERVICE} status ===" >&2
+  systemctl --no-pager --full status "$HM_SERVICE" >&2 || true
+  echo >&2
+  echo "=== ${HM_SERVICE} journal ===" >&2
+  journalctl -u "$HM_SERVICE" -n 200 --no-pager >&2 || true
+  echo "=== end diagnostics ===" >&2
+}
+
+hm_restart_checked() {
+  hm_stop_restart_loop
+
+  systemctl unmask "$HM_SERVICE" >/dev/null 2>&1 || true
+  systemctl enable "$HM_SERVICE" >/dev/null
+  systemctl restart "$HM_SERVICE"
+
+  if ! hm_wait_health; then
+    hm_service_diagnostics
+    systemctl stop "$HM_SERVICE" 2>/dev/null || true
+    systemctl reset-failed "$HM_SERVICE" 2>/dev/null || true
+    hm_die "Harness failed health verification and was stopped to prevent a restart storm."
+  fi
+
+  hm_info "Harness service health: OK"
+}
+
+# -----------------------------------------------------------------------------
+# Common preparation
+# -----------------------------------------------------------------------------
+
+hm_prepare_common() {
+  hm_require_managers
+  hm_install_os_dependencies
+  hm_ensure_dirs
+  hm_write_env_if_missing
+  hm_cleanup_aiops_mapping
+  hm_cleanup_legacy_plesk_artifacts
+
+}
+
+# -----------------------------------------------------------------------------
+# Install / repair / update / reinstall / rollback
+# -----------------------------------------------------------------------------
+
+hm_install() {
+  hm_begin_mutation
+  hm_stop_restart_loop
+
+  local requested="${1:-latest}"
+
+  hm_log "Installing DeepSeek Harness"
+  hm_prepare_common
+  hm_ensure_node
+  hm_require_ollama_runtime
+
+  hm_install_dsh "$requested"
+  hm_configure_ollama
+
+  hm_write_runner
+  hm_write_service
+  hm_restart_checked
+
+  hm_cleanup_obsolete_harness_layouts
+  hm_verify_core
+
+  hm_log "Installation complete"
+}
+
+hm_repair() {
+  hm_begin_mutation
+  hm_stop_restart_loop
+
+  hm_log "Repairing DeepSeek Harness"
+  hm_prepare_common
+  hm_ensure_node
+  hm_require_ollama_runtime
+
+  hm_repair_app
+  hm_configure_ollama
+
+  local p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    if [[ -d "$p" ]]; then
+      hm_grant_project_acl "$p"
+    else
+      hm_warn "Registered project missing: $p"
+    fi
+  done < <(hm_project_list_raw)
+
+  hm_write_runner
+  hm_write_service
+  hm_restart_checked
+
+  hm_cleanup_obsolete_harness_layouts
+  hm_verify_core
+
+  hm_log "Repair complete"
+}
+
+hm_update() {
+  hm_begin_mutation
+  hm_stop_restart_loop
+
+  hm_log "Updating DeepSeek Harness"
+  hm_prepare_common
+  hm_update_node
+  hm_require_ollama_runtime
+
+  local current latest
+  current="$(hm_package_version_at "$HM_APP" 2>/dev/null || true)"
+  latest="$(hm_latest_dsh_version)"
+
+  hm_info "Installed dsh: ${current:-not-installed}"
+  hm_info "Latest dsh:    ${latest}"
+
+  if [[ -n "$current" && "$current" == "$latest" ]]; then
+    hm_info "Harness package is already current; performing repair verification."
+    hm_repair_app
+  else
+    hm_install_dsh "$latest"
+  fi
+
+  hm_configure_ollama
+  hm_write_runner
+  hm_write_service
+  hm_restart_checked
+
+  hm_cleanup_obsolete_harness_layouts
+  hm_verify_core
+}
+
+hm_reinstall() {
+  hm_begin_mutation
+  hm_stop_restart_loop
+
+  local requested="${1:-}"
+  hm_prepare_common
+  hm_ensure_node
+  hm_require_ollama_runtime
+
+  if [[ -z "$requested" ]]; then
+    requested="$(hm_package_version_at "$HM_APP" 2>/dev/null || true)"
+    requested="${requested:-latest}"
+  fi
+
+  hm_log "Reinstalling @deepseek-ai/dsh@${requested}"
+  hm_install_dsh "$requested"
+  hm_configure_ollama
+  hm_write_runner
+  hm_write_service
+  hm_restart_checked
+  hm_cleanup_obsolete_harness_layouts
+  hm_verify_core
+}
+
+hm_rollback() {
+  hm_begin_mutation
+  hm_stop_restart_loop
+
+  [[ -d "$HM_PREVIOUS" ]] || hm_die "No previous Harness runtime is available."
+
+  local failed="${HM_BASE}/app.failed.$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ -d "$HM_APP" ]] && mv "$HM_APP" "$failed"
+  mv "$HM_PREVIOUS" "$HM_APP"
+
+  hm_make_runtime_readable "$HM_APP"
+  hm_validate_node_pty "$HM_APP" || hm_die "Previous runtime has a broken node-pty installation."
+  hm_preflight_app "$HM_APP" || hm_die "Previous runtime also fails Web preflight."
+
+  local version=""
+  version="$(hm_package_version_at "$HM_APP" 2>/dev/null || true)"
+  printf '%s\n' "${version:-unknown}" >"$HM_INSTALLED_VERSION_FILE"
+  chown root:root "$HM_INSTALLED_VERSION_FILE"
+  chmod 0644 "$HM_INSTALLED_VERSION_FILE"
+
+  hm_write_runner
+  hm_write_service
+  hm_restart_checked
+  hm_verify_core
+
+  hm_info "Rollback successful."
+  hm_info "Failed runtime preserved at: $failed"
+}
+
+hm_check_update() {
+  hm_require_root
+  hm_require_managers
+  [[ -x "$HM_NPM" ]] || hm_die "Harness Node runtime is not installed."
+
+  local current latest
+  current="$(hm_package_version_at "$HM_APP" 2>/dev/null || true)"
+  latest="$(hm_latest_dsh_version)"
+
+  echo "Installed: ${current:-not-installed}"
+  echo "Latest:    $latest"
+  if [[ -n "$current" && "$current" == "$latest" ]]; then
+    echo "Status:    current"
+  else
+    echo "Status:    update available"
+  fi
+}
+
+hm_delete() {
+  hm_begin_mutation
+
+  hm_cleanup_legacy_plesk_artifacts
+  systemctl disable --now "$HM_SERVICE" 2>/dev/null || true
+
+  rm -f "$HM_SERVICE_FILE" "$HM_RUNNER"
+  rm -rf "$HM_APP" "$HM_PREVIOUS"
+  rm -f "$HM_INSTALLED_VERSION_FILE"
+
+  systemctl daemon-reload
+  systemctl reset-failed "$HM_SERVICE" 2>/dev/null || true
+
+  hm_info "Harness application/services removed."
+  hm_info "Preserved state/config/projects/existing NVM/Ollama and the read-only Node bridge."
+}
+
+hm_purge() {
+  hm_begin_mutation
+
+  cat <<EOF
+DESTRUCTIVE OPERATION
+
+Will remove Harness-owned:
+  $HM_BASE
+  $HM_STATE
+  $HM_CONFIG
+  $HM_SERVICE_FILE
+  service identity ${HM_USER}:${HM_GROUP}
+
+Will NOT remove:
+  docker-manager
+  gvm-manager
+  miniconda-manager
+  nginx-manager
+  nvm-manager executable
+  ollama-manager / Ollama
+  registered project/codebase directories
+  unrelated '${HM_LEGACY_USER}' Linux account
+EOF
+
+  local answer=""
+  read -r -p "Type PURGE-DEEPSEEK-HARNESS to continue: " answer
+  [[ "$answer" == "PURGE-DEEPSEEK-HARNESS" ]] || hm_die "Purge cancelled."
+
+  local registered=() p
+  if [[ -f "$HM_PROJECTS" ]]; then
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && registered+=("$p")
+    done < <(hm_project_list_raw)
+  fi
+
+  hm_cleanup_legacy_plesk_artifacts
+  systemctl disable --now "$HM_SERVICE" 2>/dev/null || true
+
+  local node_mount_unit
+  node_mount_unit="$(hm_node_mount_unit)"
+  systemctl disable --now "$node_mount_unit" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${node_mount_unit}"
+
+  rm -f "$HM_SERVICE_FILE" "$HM_RUNNER"
+  systemctl daemon-reload
+
+  for p in "${registered[@]}"; do
+    hm_remove_project_acl "$p"
+  done
+
+  rm -rf "$HM_BASE" "$HM_CONFIG" "$HM_STATE"
+
+  if hm_user_exists; then
+    userdel "$HM_USER" 2>/dev/null || true
+  fi
+  if getent group "$HM_GROUP" >/dev/null 2>&1; then
+    groupdel "$HM_GROUP" 2>/dev/null || true
+  fi
+
+  hm_info "Harness purged. Other managers, Ollama and project code were preserved."
+}
+
+# -----------------------------------------------------------------------------
+# Verification / doctor / status
+# -----------------------------------------------------------------------------
+
+hm_verify_loopback_listener() {
+  local name="$1"
+  local port="$2"
+
+  local endpoints=""
+  endpoints="$(
+    {
+      ss -H -lnt4 "( sport = :${port} )" 2>/dev/null || true
+      ss -H -lnt6 "( sport = :${port} )" 2>/dev/null || true
+    } | awk '{print $4}' | sed '/^[[:space:]]*$/d' | sort -u
+  )"
+
+  [[ -n "$endpoints" ]] || hm_die "${name} is not listening on TCP port ${port}."
+
+  local ep seen_loopback=0
+  while IFS= read -r ep; do
+    [[ -n "$ep" ]] || continue
+
+    case "$ep" in
+      "127.0.0.1:${port}"|"[::1]:${port}"|"::1:${port}")
+        seen_loopback=1
+        ;;
+      *)
+        echo "Unexpected ${name} local listener: ${ep}" >&2
+        hm_die "Unsafe non-loopback ${name} listener detected."
+        ;;
+    esac
+  done <<<"$endpoints"
+
+  (( seen_loopback == 1 )) || hm_die "${name} has no loopback listener on port ${port}."
+
+  printf '%s\n' "$endpoints"
+}
+
+hm_verify_core() {
+  hm_require_root
+  hm_load_env
+
+  echo "=== DeepSeek Harness verification ==="
+
+  echo "[1/12] Ubuntu / canonical manager"
+  hm_require_ubuntu_2404
+  [[ "$(hm_canonical_manager_version)" == "$HM_VERSION" ]] || \
+    hm_die "Canonical harness-manager is $(hm_canonical_manager_version), expected ${HM_VERSION}."
+
+  echo "[2/12] Required managers"
+  hm_require_managers
+
+  echo "[3/12] Service identity / aiops cleanup"
+  hm_user_exists || hm_die "Harness service user is missing."
+  [[ "$(id -gn "$HM_USER")" == "$HM_GROUP" ]] || hm_die "Harness primary group mismatch."
+  local members=""
+  members="$(getent group "$HM_GROUP" | awk -F: '{print $4}')"
+  [[ ",${members}," != *",${HM_LEGACY_USER},"* ]] || \
+    hm_die "Legacy aiops group mapping remains."
+
+  echo "[4/12] Existing NVM Node bridge / npm"
+  [[ -x "$HM_NODE" && -x "$HM_NPM" ]] || hm_die "Read-only Node runtime bridge is incomplete."
+  [[ "$(hm_node_major)" == "$HM_NODE_MAJOR" ]] || hm_die "Unexpected Node major."
+  mountpoint -q "$HM_NODE_RUNTIME" || hm_die "Node runtime bridge is not mounted."
+
+  echo "[5/12] Harness package / permissions"
+  [[ -x "$HM_DSH" ]] || hm_die "Canonical dsh missing: $HM_DSH"
+  runuser -u "$HM_USER" -- test -x "$HM_DSH" || {
+    namei -l "$HM_DSH" >&2 || true
+    hm_die "Harness service user cannot execute dsh."
+  }
+  local dver=""
+  dver="$(hm_dsh_version 2>/dev/null || true)"
+  [[ -n "$dver" ]] || hm_die "dsh --version failed as service user."
+
+  echo "[6/12] node-pty / real PTY spawn / subprocess helper"
+  hm_validate_node_pty "$HM_APP" || hm_die "node-pty native runtime cannot load."
+  hm_validate_spawn_helpers "$HM_APP" || hm_die "node-pty spawn-helper is not executable."
+
+  echo "[7/12] Ollama provider"
+  hm_require_ollama_runtime
+  local settings
+  settings="$(hm_settings_file)"
+  [[ -f "$settings" ]] || hm_die "Harness settings.yaml is missing."
+  grep -Fq "$HM_OLLAMA_OPENAI" "$settings" || hm_die "Harness Ollama provider route is missing."
+
+  echo "[8/12] Runner / systemd policy"
+  hm_verify_runner
+  systemctl cat "$HM_SERVICE" >/dev/null 2>&1 || hm_die "Harness systemd unit missing."
+  [[ "$(systemctl show "$HM_SERVICE" -p User --value)" == "$HM_USER" ]] || hm_die "Wrong systemd service user."
+  local effective_private_devices effective_no_new_privileges effective_user
+  effective_user="$(systemctl show "$HM_SERVICE" -p User --value)"
+  effective_private_devices="$(systemctl show "$HM_SERVICE" -p PrivateDevices --value)"
+  effective_no_new_privileges="$(systemctl show "$HM_SERVICE" -p NoNewPrivileges --value)"
+
+  [[ "$effective_user" == "$HM_USER" ]] || hm_die "Wrong systemd service user: ${effective_user:-unset}"
+  [[ "$effective_private_devices" == "no" || "$effective_private_devices" == "false" ]] ||     hm_die "Effective PrivateDevices is '${effective_private_devices:-unset}', which would block PTY operation."
+  [[ "$effective_no_new_privileges" == "yes" || "$effective_no_new_privileges" == "true" ]] ||     hm_die "Effective NoNewPrivileges is '${effective_no_new_privileges:-unset}', expected enabled."
+
+  grep -Eq '^[[:space:]]*StartLimitBurst[[:space:]]*=[[:space:]]*5[[:space:]]*$' "$HM_SERVICE_FILE" ||     hm_die "Restart-storm protection missing."
+
+  echo "[9/12] Harness service health"
+  systemctl is-active --quiet "$HM_SERVICE" || hm_die "Harness service is inactive."
+  hm_health || hm_die "Harness localhost HTTP health failed."
+
+  echo "[10/12] Network isolation"
+  local harness_endpoints ollama_endpoints
+  harness_endpoints="$(hm_verify_loopback_listener "Harness" "$HARNESS_PORT")"
+  ollama_endpoints="$(hm_verify_loopback_listener "Ollama" "11434")"
+
+  hm_info "Harness listener(s): $(tr '\n' ' ' <<<"$harness_endpoints" | xargs)"
+  hm_info "Ollama listener(s):  $(tr '\n' ' ' <<<"$ollama_endpoints" | xargs)"
+
+  echo "[11/12] Projects"
+  local p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    [[ -d "$p" ]] || hm_die "Registered project missing: $p"
+    runuser -u "$HM_USER" -- test -r "$p" || hm_die "Harness cannot read $p"
+    runuser -u "$HM_USER" -- test -w "$p" || hm_die "Harness cannot write $p"
+  done < <(hm_project_list_raw)
+
+  echo "[12/12] Config / no duplicate Node / legacy topology cleanup"
+  grep -Eq '^DSH_TELEMETRY_DISABLED=1$' "$HM_ENV" || hm_die "Telemetry-disable policy missing."
+  [[ ! -e "${HM_STATE}/.nvm" ]] || hm_die "Unexpected duplicate Harness-specific NVM runtime exists."
+  [[ ! -e "/etc/systemd/system/deepseek-harness-tunnel.service" ]] || \
+    hm_die "Legacy remote-tunnel unit still exists; run '$0 repair'."
+
+  echo
+  echo "DEEPSEEK HARNESS: VERIFIED"
+  echo "Manager:        $HM_VERSION"
+  echo "Node.js:        $("$HM_NODE" --version) (nvm-manager)"
+  echo "npm:            $(hm_npm_version)"
+  echo "Harness:        $dver"
+  echo "Binary:         $HM_DSH"
+  echo "AI provider:    Ollama ($HM_OLLAMA_OPENAI)"
+  echo "Harness bind:   127.0.0.1:${HARNESS_PORT}"
+  echo "Harness server: $HM_HARNESS_SERVER_IP"
+  echo "aiops mapping:  clean"
+}
+
+hm_verify() {
+  hm_require_root
+  hm_lock
+  hm_verify_core
+}
+
+hm_doctor() {
+  hm_require_root
+  hm_load_env
+
+  echo "=== DeepSeek Harness doctor ==="
+  echo "Running manager:   $HM_VERSION"
+  echo "Canonical manager: $(hm_canonical_manager_version)"
+  echo "Canonical path:    $HM_MANAGER_PATH"
+  echo
+
+  hm_prereqs
+  echo
+
+  echo "=== Identity ==="
+  id "$HM_USER" 2>/dev/null || true
+  getent group "$HM_GROUP" 2>/dev/null || true
+  echo
+
+  echo "=== Paths ==="
+  ls -ld "$HM_BASE" "$HM_APP" "$HM_STATE" "$HM_DSH_HOME" 2>/dev/null || true
+  if [[ -e "$HM_DSH" ]]; then
+    namei -l "$HM_DSH" || true
+    echo "Resolved dsh: $(readlink -f "$HM_DSH" 2>/dev/null || true)"
+  fi
+  echo
+
+  echo "=== Runtime ==="
+  [[ -x "$HM_NODE" ]] && "$HM_NODE" --version || true
+  [[ -x "$HM_NPM" ]] && hm_npm_version || true
+
+  if [[ -e "$HM_DSH" ]]; then
+    if hm_dsh_version; then
+      echo "dsh service-user execution: OK"
+    else
+      echo "dsh service-user execution: FAILED"
+    fi
+  fi
+
+  if [[ -d "$HM_APP/node_modules" ]]; then
+    hm_validate_node_pty "$HM_APP" >/dev/null 2>&1 && \
+      echo "node-pty: OK" || echo "node-pty: FAILED"
+  fi
+  echo
+
+  echo "=== Ollama ==="
+  hm_ollama_status || true
+  echo
+
+  echo "=== Service ==="
+  systemctl --no-pager --full status "$HM_SERVICE" 2>/dev/null | sed -n '1,28p' || true
+  if systemctl cat "$HM_SERVICE" >/dev/null 2>&1; then
+    echo
+    echo "Effective security properties:"
+    systemctl show "$HM_SERVICE"       -p User       -p Group       -p NoNewPrivileges       -p PrivateDevices       -p ProtectSystem       -p ProtectHome       --no-pager || true
+  fi
+  echo
+
+  echo "=== Relevant listeners ==="
+  ss -H -lntp 2>/dev/null | awk '$4 ~ /:(3080|11434)$/ {print}' || true
+  echo
+
+  echo "Automatic repair using this exact script:"
+  echo "  sudo $(hm_source_path) repair"
+}
+
+hm_status() {
+  hm_load_env
+
+  echo "=== DeepSeek Harness ==="
+  echo "Manager:          $HM_VERSION"
+  echo "Canonical mgr:    $(hm_canonical_manager_version)"
+  echo "Harness server:   $HM_HARNESS_SERVER_IP"
+  echo "Harness endpoint: http://127.0.0.1:${HARNESS_PORT}"
+  echo "Ollama endpoint:  $HM_OLLAMA_OPENAI"
+  echo
+
+  hm_prereqs
+  echo
+
+  [[ -x "$HM_NODE" ]] && echo "Node:    $("$HM_NODE" --version)" || true
+  [[ -x "$HM_NPM" ]] && echo "npm:     $(hm_npm_version)" || true
+  [[ -e "$HM_DSH" ]] && echo "Harness: $(hm_dsh_version 2>/dev/null || echo 'execution failed')" || true
+  echo
+
+  systemctl --no-pager --full status "$HM_SERVICE" 2>/dev/null | sed -n '1,24p' || true
+  echo
+
+  hm_ollama_status || true
+  echo
+  hm_projects
+  echo
+}
+
+hm_start() {
+  hm_require_root
+  hm_verify_runner
+  hm_restart_checked
+}
+
+hm_stop() {
+  hm_require_root
+  systemctl stop "$HM_SERVICE"
+  systemctl reset-failed "$HM_SERVICE" 2>/dev/null || true
+}
+
+hm_restart() {
+  hm_require_root
+  hm_verify_runner
+  hm_restart_checked
+}
+
+hm_logs() {
+  hm_require_root
+  local n="${1:-$HM_LOG_LINES}"
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] || hm_die "LINES must be a positive integer."
+  (( n <= 5000 )) || hm_die "LINES is capped at 5000."
+  journalctl -u "$HM_SERVICE" -n "$n" --no-pager
+}
+
+hm_follow() {
+  hm_require_root
+  journalctl -u "$HM_SERVICE" -f
+}
+
+hm_version() {
+  echo "harness-manager $HM_VERSION"
+  echo "canonical-manager $(hm_canonical_manager_version)"
+  [[ -x "$HM_NODE" ]] && echo "node $("$HM_NODE" --version 2>/dev/null || true)" || true
+  if [[ -e "$HM_DSH" ]]; then
+    local d=""
+    d="$(hm_dsh_version 2>/dev/null || true)"
+    [[ -n "$d" ]] && echo "dsh $d" || echo "dsh installed-but-not-executable-as-${HM_USER}"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Legacy remote-tunnel cleanup
+# -----------------------------------------------------------------------------
+
+hm_cleanup_legacy_plesk_artifacts() {
+  local legacy_service="deepseek-harness-tunnel.service"
+  local legacy_unit="/etc/systemd/system/${legacy_service}"
+  local legacy_env="${HM_CONFIG}/tunnel.env"
+  systemctl disable --now "$legacy_service" >/dev/null 2>&1 || true
+  rm -f "$legacy_unit" "$legacy_env"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "$legacy_service" >/dev/null 2>&1 || true
+}
+
+hm_backup() {
+  hm_begin_mutation
+
+  local out="${1:-/root/deepseek-harness-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"
+  [[ "$out" == /* ]] || hm_die "Backup path must be absolute."
+
+  local items=()
+  [[ -d "$HM_CONFIG" ]] && items+=("${HM_CONFIG#/}")
+  [[ -d "$HM_DSH_HOME" ]] && items+=("${HM_DSH_HOME#/}")
+
+  ((${#items[@]} > 0)) || hm_die "Nothing to back up."
+
+  tar --acls --xattrs --numeric-owner -C / -czf "$out" "${items[@]}"
+  chown root:root "$out"
+  chmod 0600 "$out"
+
+  hm_info "Backup created: $out"
+  hm_warn "Project code, Ollama authentication/data, and NVM runtime are intentionally excluded."
+}
+
+hm_local_access() {
+  hm_load_env
+
+  cat <<EOF
+From your workstation:
+
+  ssh -N -L ${HARNESS_PORT}:127.0.0.1:${HARNESS_PORT} root@${HM_HARNESS_SERVER_IP}
+
+Then open:
+
+  http://localhost:${HARNESS_PORT}
+
+Use this loopback path for privileged Harness Web operations that DeepSeek
+intentionally keeps local-only.
+EOF
+}
+
+hm_config() {
+  hm_load_env
+
+  echo "=== Harness config ==="
+  echo "Manager:          $HM_VERSION"
+  echo "Canonical mgr:    $(hm_canonical_manager_version)"
+  echo "Service identity: ${HM_USER}:${HM_GROUP}"
+  echo "App:              $HM_APP"
+  echo "DSH_HOME:         $HM_DSH_HOME"
+  echo "Node bridge:      $HM_NODE_RUNTIME (read-only from root NVM)"
+  echo "Harness Web:      http://127.0.0.1:${HARNESS_PORT}"
+  echo "Ollama:           $HM_OLLAMA_OPENAI"
+  echo "Harness server:   $HM_HARNESS_SERVER_IP"
+
+  echo
+  echo "Trusted authorities:"
+  hm_trusted_list || true
+
+  echo
+  hm_projects
+}
+
+hm_help() {
+  cat <<EOF
+DeepSeek Harness Manager v${HM_VERSION}
+Ubuntu 24.04 LTS
+
+Fresh-server prerequisites:
+  1. Install nvm-manager and Node 24 once for root.
+  2. Install/configure ollama-manager.
+  3. Run:
+       sudo ./harness-manager install
+
+Harness reuses root nvm-manager's Node 24 through a read-only bind mount.
+It does NOT install Node again for the 'harness' user.
+
+Required managers:
+  ${HM_NVM_MANAGER}
+  ${HM_OLLAMA_MANAGER}
+
+Optional existing managers are detected but never modified:
+  docker-manager
+  gvm-manager
+  miniconda-manager
+
+Lifecycle:
+  install [latest|VERSION]
+  repair
+  update
+  reinstall [latest|VERSION]
+  rollback
+  check-update
+  delete | uninstall
+  purge
+
+Service:
+  start
+  stop
+  restart
+  status
+  verify
+  doctor
+  logs [LINES]
+  follow
+
+Inspection:
+  version
+  config
+  prereqs
+
+Ollama:
+  ollama-status
+  ollama-configure
+  ollama-sync
+  ollama-models
+  ollama-cloud-models
+  ollama-use MODEL
+  ollama-key-status
+  ollama-signin
+
+Projects:
+  project-add /absolute/path
+  project-remove /absolute/path
+  projects
+  project-check /absolute/path
+
+Public host trust:
+  trusted-add HOST[:PORT]
+  trusted-remove HOST[:PORT]
+  trusted-list
+
+Public edge:
+  nginx-manager harness-setup DOMAIN EMAIL [AUTH_USER]
+  local-access for privileged localhost-only Settings.
+
+Backup/admin:
+  backup [ABSOLUTE_FILE]
+  local-access
+
+Defaults:
+  Harness:        ${HM_HARNESS_SERVER_IP}
+  Harness bind:   127.0.0.1:${HM_DEFAULT_HARNESS_PORT}
+  Ollama:         ${HM_OLLAMA_OPENAI}
+  Node:           ${HM_NODE_MAJOR}.x reused from root nvm-manager via read-only bind mount
+
+Reliability rules:
+  - one canonical Harness runtime only
+  - package staging before activation
+  - published npm runtime does not require global pnpm
+  - npm allowScripts mirrors DeepSeek reviewed native/postinstall policy
+  - node-pty native addon is verified before activation
+  - dsh --version is tested as '${HM_USER}'
+  - dsh web is preflighted before activation
+  - failed installs never replace the active app
+  - one previous runtime is retained for rollback
+  - failed service health stops the service instead of looping forever
+  - listener verification inspects only the local bind-address column from ss
+
+Security rules:
+  - Harness runs as unprivileged '${HM_USER}'
+  - Harness binds only to 127.0.0.1
+  - Ollama is expected only on 127.0.0.1:11434
+  - no DeepSeek API key is stored by this manager
+  - Ollama Cloud auth remains owned by ollama-manager/Ollama
+  - Node is reused from /root/.nvm through a read-only bind mount; /root itself is not exposed
+  - no access is granted to /root/.gvm
+  - /opt/miniconda3/bin is added to Harness PATH only when present
+  - aiops mappings are removed without deleting the aiops OS account
+EOF
+}
+
+# -----------------------------------------------------------------------------
+# Dispatch
+# -----------------------------------------------------------------------------
+
+hm_main() {
+  local cmd="${1:-help}"
+
+  case "$cmd" in
+    install)
+      shift
+      hm_install "${1:-latest}"
+      ;;
+    repair) hm_repair ;;
+    update) hm_update ;;
+    reinstall)
+      shift
+      hm_reinstall "${1:-}"
+      ;;
+    rollback) hm_rollback ;;
+    check-update) hm_check_update ;;
+    delete|remove|uninstall) hm_delete ;;
+    purge) hm_purge ;;
+
+    start) hm_start ;;
+    stop) hm_stop ;;
+    restart) hm_restart ;;
+    status) hm_status ;;
+    verify) hm_verify ;;
+    doctor) hm_doctor ;;
+    logs)
+      shift
+      hm_logs "${1:-$HM_LOG_LINES}"
+      ;;
+    follow) hm_follow ;;
+
+    version) hm_version ;;
+    config) hm_config ;;
+    prereqs|toolchain-status) hm_prereqs ;;
+
+    ollama-status) hm_ollama_status ;;
+    ollama-configure)
+      hm_begin_mutation
+      hm_prepare_common
+      hm_configure_ollama
+      if systemctl is-active --quiet "$HM_SERVICE" 2>/dev/null; then
+        hm_restart_checked
+      fi
+      ;;
+    ollama-sync)
+      hm_begin_mutation
+      hm_prepare_common
+      hm_configure_ollama
+      if systemctl is-active --quiet "$HM_SERVICE" 2>/dev/null; then
+        hm_restart_checked
+      fi
+      ;;
+    ollama-models) hm_ollama_model_ids ;;
+    ollama-cloud-models) "$HM_OLLAMA_MANAGER" cloud-models ;;
+    ollama-use)
+      shift
+      hm_ollama_use "${1:-}"
+      ;;
+    ollama-key-status) "$HM_OLLAMA_MANAGER" key-status ;;
+    ollama-signin) "$HM_OLLAMA_MANAGER" signin ;;
+
+    project-add)
+      shift
+      hm_project_add "${1:-}"
+      ;;
+    project-remove)
+      shift
+      hm_project_remove "${1:-}"
+      ;;
+    projects|project-list) hm_projects ;;
+    project-check)
+      shift
+      hm_project_check "${1:-}"
+      ;;
+
+    trusted-add)
+      shift
+      hm_trusted_add "${1:-}"
+      ;;
+    trusted-remove)
+      shift
+      hm_trusted_remove "${1:-}"
+      ;;
+    trusted-list) hm_trusted_list ;;
+
+    backup)
+      shift
+      hm_backup "${1:-}"
+      ;;
+    local-access) hm_local_access ;;
+
+    help|-h|--help) hm_help ;;
+    *)
+      hm_help >&2
+      hm_die "Unknown command: $cmd"
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  hm_main "$@"
+fi

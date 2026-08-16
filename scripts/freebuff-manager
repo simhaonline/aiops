@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 027
+
+# freebuff-manager v1.0.1
+# Ubuntu 24.04 LTS
+# Freebuff CLI lifecycle through the existing root-scoped nvm-manager.
+
+readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_PATH="/usr/local/bin/freebuff-manager"
+readonly LOCK_FILE="/run/lock/freebuff-manager.lock"
+
+log()  { printf '\n==> %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+on_error() { local rc=$?; printf '[ERROR] Command failed at line %s (exit %s).\n' "${BASH_LINENO[0]:-?}" "$rc" >&2; exit "$rc"; }
+trap on_error ERR
+require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root."; }
+require_ubuntu() { [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."; . /etc/os-release; [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || die "Ubuntu 24.04 LTS required."; }
+lock() { install -d -m 0755 /run/lock; exec 9>"$LOCK_FILE"; flock -w 120 9 || die "Another freebuff-manager operation is active."; }
+self_install() { local s; s="$(readlink -f "${BASH_SOURCE[0]}")"; if [[ "$s" != "$MANAGER_PATH" ]]; then install -o root -g root -m 0755 "$s" "$MANAGER_PATH"; fi; }
+begin() { require_root; require_ubuntu; lock; self_install; }
+
+readonly NVM_DIR="/root/.nvm"
+readonly NODE_BIN_LINK="${NVM_DIR}/default-bin"
+require_nvm() {
+  [[ -x /usr/local/bin/nvm-manager ]] || die "nvm-manager is required."
+  [[ -s "$NVM_DIR/nvm.sh" ]] || die "NVM runtime missing."
+  /usr/local/bin/nvm-manager verify >/dev/null
+}
+node_cmd() {
+  bash --noprofile --norc -c 'set -Eeuo pipefail; export NVM_DIR=/root/.nvm; . "$NVM_DIR/nvm.sh" --no-use; nvm use default >/dev/null; exec "$@"' bash "$@"
+}
+npm_install() { node_cmd npm install --global "$1"; }
+
+readonly PACKAGE="freebuff"
+readonly BIN="${NODE_BIN_LINK}/freebuff"
+readonly WRAPPER="/usr/local/bin/freebuff"
+readonly RUNTIME_DIR="/root/.config/manicode"
+readonly RUNTIME_BIN="${RUNTIME_DIR}/freebuff"
+readonly RUNTIME_METADATA="${RUNTIME_DIR}/freebuff-metadata.json"
+readonly BOOTSTRAP_TIMEOUT_SECONDS="600"
+install_package() { npm_install "${PACKAGE}@${1:-latest}"; }
+write_wrapper() { cat >"$WRAPPER" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec ${BIN} "\$@"
+EOF
+chmod 0755 "$WRAPPER"; }
+runtime_version() {
+  [[ -r "$RUNTIME_METADATA" ]] || return 0
+  sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$RUNTIME_METADATA" | head -n1
+}
+
+package_installed() {
+  node_cmd npm list -g --depth=0 "$PACKAGE" >/dev/null 2>&1
+}
+
+runtime_cached() {
+  [[ -x "$RUNTIME_BIN" && -r "$RUNTIME_METADATA" ]]
+}
+
+verify_fb() {
+  require_root
+  echo '=== Freebuff verification ==='
+  require_nvm
+
+  echo '[1/5] NPM package'
+  package_installed || die "Global npm package '${PACKAGE}' is not installed."
+
+  echo '[2/5] NVM launcher'
+  [[ -x "$BIN" ]] || die "Freebuff npm launcher missing: $BIN"
+  [[ -f "$(readlink -f "$BIN")" ]] || die "Freebuff npm launcher target is invalid."
+
+  echo '[3/5] Canonical wrapper'
+  [[ -x "$WRAPPER" ]] || die "Canonical wrapper missing: $WRAPPER"
+  grep -Fq "$BIN" "$WRAPPER" || die "Canonical wrapper does not target the managed NVM launcher."
+
+  echo '[4/5] Runtime cache'
+  if runtime_cached; then
+    info "Native runtime cached: $RUNTIME_BIN"
+    local rv
+    rv="$(runtime_version || true)"
+    [[ -z "$rv" ]] || info "Native runtime version: $rv"
+  else
+    info "Native runtime not cached yet. This is normal after npm installation."
+    info "Run 'freebuff' once interactively, or 'freebuff-manager bootstrap', to download it."
+  fi
+
+  echo '[5/5] Ownership / permissions'
+  [[ "$(stat -c '%U:%G' "$WRAPPER")" == "root:root" ]] || die "Unexpected wrapper ownership."
+  [[ "$(stat -c '%a' "$WRAPPER")" == "755" ]] || die "Unexpected wrapper mode."
+
+  echo
+  echo 'FREEBUFF INSTALLATION: VERIFIED'
+}
+
+bootstrap_runtime() {
+  begin
+  require_nvm
+  package_installed || die "Install Freebuff first: freebuff-manager install"
+  [[ -x "$BIN" ]] || die "Freebuff npm launcher missing: $BIN"
+  write_wrapper
+
+  log "Bootstrapping Freebuff native runtime"
+  info "Upstream downloads the platform binary on first launcher execution."
+  info "Download/runtime errors are intentionally NOT hidden."
+
+  local rc=0
+  if timeout --foreground "$BOOTSTRAP_TIMEOUT_SECONDS" "$BIN" --version; then
+    rc=0
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      die "Freebuff bootstrap timed out after ${BOOTSTRAP_TIMEOUT_SECONDS}s."
+    fi
+    die "Freebuff upstream launcher/runtime failed with exit ${rc}. Review the error printed above."
+  fi
+
+  runtime_cached || die "Freebuff launcher returned success but native runtime cache is incomplete."
+
+  echo
+  echo "FREEBUFF RUNTIME: READY"
+  echo "Binary:  $RUNTIME_BIN"
+  echo "Version: $(runtime_version || echo unknown)"
+}
+
+runtime_check() {
+  require_root
+  require_nvm
+  [[ -x "$BIN" ]] || die "Freebuff npm launcher missing: $BIN"
+
+  if ! runtime_cached; then
+    warn "Native runtime is not cached yet."
+    warn "Use: freebuff-manager bootstrap"
+    return 1
+  fi
+
+  log "Freebuff runtime check"
+  if timeout --foreground 60 "$BIN" --version; then
+    echo "FREEBUFF RUNTIME CHECK: PASS"
+  else
+    local rc=$?
+    die "Freebuff runtime check failed with exit ${rc}. Review the upstream output above."
+  fi
+}
+
+post_install_message() {
+  echo
+  info "Freebuff npm launcher is installed."
+  if runtime_cached; then
+    info "Native runtime is already cached and ready."
+  else
+    info "Freebuff's native runtime is downloaded by its launcher on first execution."
+    info "Run 'freebuff' interactively, or pre-download it with: freebuff-manager bootstrap"
+  fi
+}
+
+install_fb() {
+  begin
+  require_nvm
+  install_package latest
+  write_wrapper
+  verify_fb
+  post_install_message
+}
+
+repair() {
+  begin
+  require_nvm
+  package_installed || install_package latest
+  write_wrapper
+  verify_fb
+  post_install_message
+}
+
+reinstall() {
+  begin
+  require_nvm
+  backup >/dev/null
+  install_package latest
+  write_wrapper
+  verify_fb
+  post_install_message
+}
+
+update() {
+  begin
+  require_nvm
+  install_package latest
+  write_wrapper
+  verify_fb
+  post_install_message
+}
+
+check_update() {
+  require_root
+  require_nvm
+  echo '=== Freebuff update check ==='
+  node_cmd npm list -g --depth=0 "$PACKAGE" 2>/dev/null || true
+  echo "latest=$(node_cmd npm view "$PACKAGE" version)"
+  if runtime_cached; then
+    echo "runtime_cached=yes"
+    echo "runtime_version=$(runtime_version || true)"
+  else
+    echo "runtime_cached=no"
+  fi
+}
+
+version() {
+  echo "freebuff-manager $MANAGER_VERSION"
+  node_cmd npm list -g --depth=0 "$PACKAGE" 2>/dev/null | sed -n '2p' || true
+  if runtime_cached; then
+    echo "runtime $(runtime_version || echo unknown)"
+  else
+    echo "runtime not-cached"
+  fi
+}
+
+status() {
+  version
+  echo "launcher: $([[ -x "$BIN" ]] && echo present || echo missing)"
+  echo "wrapper:  $([[ -x "$WRAPPER" ]] && echo present || echo missing)"
+  echo "runtime:  $(runtime_cached && echo cached || echo not-cached)"
+}
+
+doctor() {
+  status
+  echo
+  echo "NVM:"
+  /usr/local/bin/nvm-manager version 2>/dev/null || true
+  echo
+  echo "Managed files:"
+  ls -l "$BIN" "$WRAPPER" "$RUNTIME_BIN" "$RUNTIME_METADATA" 2>/dev/null || true
+  echo
+  echo "NPM package:"
+  node_cmd npm list -g --depth=0 "$PACKAGE" 2>/dev/null || true
+}
+backup() { require_root; local out="${1:-/root/freebuff-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"; [[ "$out" == /* ]] || die "Backup path must be absolute."; local items=(); [[ -d /root/.freebuff ]] && items+=(.freebuff); [[ -d /root/.codebuff ]] && items+=(.codebuff); [[ -d /root/.config/freebuff ]] && items+=(.config/freebuff); [[ -d /root/.config/codebuff ]] && items+=(.config/codebuff); if ((${#items[@]})); then tar -C /root -czf "$out" "${items[@]}"; else tar -czf "$out" --files-from /dev/null; fi; chmod 0600 "$out"; echo "$out"; }
+help() { cat <<EOF
+freebuff-manager $MANAGER_VERSION
+Lifecycle: install | repair | update | reinstall | check-update
+Runtime: bootstrap | runtime-check
+Inspection: status | verify | doctor | version
+CLI: cli [ARGS...]
+Backup: backup [FILE]
+Policy: Freebuff is ad-supported. Review its current privacy/data terms before using sensitive repositories.
+EOF
+}
+case "${1:-help}" in
+  install) install_fb;; repair) repair;; update) update;; reinstall) reinstall;; check-update) check_update;;
+  bootstrap) bootstrap_runtime;; runtime-check) runtime_check;;
+  status) status;; verify) verify_fb;; doctor) doctor;; version) version;;
+  cli) shift; exec "$BIN" "$@";; backup) backup "${2:-}";; help|-h|--help) help;; *) help; exit 2;;
+esac

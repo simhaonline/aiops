@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# LEGACY SUPPORT SNAPSHOT
+# Suite archive: pre-1.0.1 internal manager lineage
+# This file is NOT installed on PATH and is preserved for rollback/reference only.
+readonly AIOPS_LEGACY_RELEASE="1.0.1"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 027
+
+# codex-manager v1.0.1
+# Ubuntu 24.04 LTS
+# OpenAI Codex CLI + optional localhost App Server lifecycle.
+
+readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_PATH="/usr/local/bin/codex-manager"
+readonly LOCK_FILE="/run/lock/codex-manager.lock"
+
+log()  { printf '\n==> %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+on_error() { local rc=$?; printf '[ERROR] Command failed at line %s (exit %s).\n' "${BASH_LINENO[0]:-?}" "$rc" >&2; exit "$rc"; }
+trap on_error ERR
+require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root."; }
+require_ubuntu() { [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."; . /etc/os-release; [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || die "Ubuntu 24.04 LTS required."; }
+lock() { install -d -m 0755 /run/lock; exec 9>"$LOCK_FILE"; flock -w 120 9 || die "Another codex-manager operation is active."; }
+self_install() { local s; s="$(readlink -f "${BASH_SOURCE[0]}")"; if [[ "$s" != "$MANAGER_PATH" ]]; then install -o root -g root -m 0755 "$s" "$MANAGER_PATH"; fi; }
+begin() { require_root; require_ubuntu; lock; self_install; }
+
+readonly CODEX_HOME_DIR="/root/.codex"
+readonly CODEX_BIN_DIR="/root/.local/bin"
+readonly CODEX_BIN="${CODEX_BIN_DIR}/codex"
+readonly CODE_MODE_BIN="${CODEX_BIN_DIR}/codex-code-mode-host"
+readonly INSTALL_URL="https://raw.githubusercontent.com/openai/codex/main/scripts/install/install.sh"
+readonly SERVICE="codex-app-server.service"
+readonly SERVICE_FILE="/etc/systemd/system/${SERVICE}"
+readonly APP_HOST="127.0.0.1"
+readonly APP_PORT="4500"
+readonly PROJECTS_FILE="/etc/codex-manager.projects"
+
+install_deps() {
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git gawk grep tar xz-utils util-linux
+}
+download_installer() {
+  local f="$1"
+  curl -fsSL --proto '=https' --tlsv1.2 "$INSTALL_URL" -o "$f"
+  grep -Fq 'RELEASES_BASE_URL="https://releases.openai.com/codex"' "$f" || die "Unexpected Codex installer source."
+  grep -Fq 'CODEX_INSTALL_DIR' "$f" || die "Installer lacks CODEX_INSTALL_DIR support."
+  grep -Fq 'CODEX_NON_INTERACTIVE' "$f" || die "Installer lacks non-interactive support."
+  chmod 0700 "$f"
+}
+run_installer() {
+  local rel="${1:-latest}" f
+  [[ "$rel" =~ ^[0-9A-Za-z._+-]+$ ]] || die "Unsafe release identifier."
+  f="$(mktemp /tmp/codex-install.XXXXXX.sh)"
+  download_installer "$f"
+  CODEX_HOME="$CODEX_HOME_DIR" CODEX_INSTALL_DIR="$CODEX_BIN_DIR" CODEX_NON_INTERACTIVE=1 bash "$f" --release "$rel"
+  rm -f "$f"
+  [[ -x "$CODEX_BIN" ]] || die "Codex binary missing after install."
+  ln -sfn "$CODEX_BIN" /usr/local/bin/codex
+  if [[ -x "$CODE_MODE_BIN" ]]; then ln -sfn "$CODE_MODE_BIN" /usr/local/bin/codex-code-mode-host; fi
+}
+write_service() {
+  cat >"$SERVICE_FILE" <<EOF
+[Unit]
+Description=OpenAI Codex App Server (localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+Environment=CODEX_HOME=${CODEX_HOME_DIR}
+ExecStart=${CODEX_BIN} app-server --listen ws://${APP_HOST}:${APP_PORT}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$SERVICE_FILE"
+  systemctl daemon-reload
+}
+install_codex() { begin; install_deps; install -d -m 0755 "$CODEX_BIN_DIR" "$CODEX_HOME_DIR"; run_installer "${1:-latest}"; write_service; verify_codex; }
+repair() { begin; install_deps; install -d -m 0755 "$CODEX_BIN_DIR" "$CODEX_HOME_DIR"; [[ -x "$CODEX_BIN" ]] || run_installer latest; ln -sfn "$CODEX_BIN" /usr/local/bin/codex; write_service; verify_codex; }
+reinstall() { begin; install_deps; backup >/dev/null; install -d -m 0755 "$CODEX_BIN_DIR" "$CODEX_HOME_DIR"; run_installer "${1:-latest}"; write_service; if systemctl is-active --quiet "$SERVICE"; then systemctl restart "$SERVICE"; fi; verify_codex; }
+backup() {
+  require_root
+  local out="${1:-/root/codex-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"
+  [[ "$out" == /* ]] || die "Backup path must be absolute."
+  if [[ -d "$CODEX_HOME_DIR" ]]; then tar -C /root -czf "$out" .codex; else tar -czf "$out" --files-from /dev/null; fi
+  chmod 0600 "$out"; echo "$out"
+}
+update() { begin; install_deps; backup >/dev/null; run_installer "${1:-latest}"; if systemctl is-active --quiet "$SERVICE"; then systemctl restart "$SERVICE"; fi; verify_codex; }
+check_update() { require_root; [[ -x "$CODEX_BIN" ]] || die "Codex is not installed."; "$CODEX_BIN" --version; echo "Use 'codex-manager update' to resolve/install the official current release."; }
+version() { echo "codex-manager $MANAGER_VERSION"; if [[ -x "$CODEX_BIN" ]]; then "$CODEX_BIN" --version; fi; }
+verify_loopback() {
+  local bad
+  bad="$(ss -H -lnt 2>/dev/null | awk '$4 ~ /:4500$/ {print $4}' | grep -Ev '^(127\.0\.0\.1:4500|\[::1\]:4500)$' || true)"
+  [[ -z "$bad" ]] || die "Unsafe Codex App Server listener: $bad"
+}
+listener_present() {
+  ss -H -lnt 2>/dev/null | awk '{print $4}' | grep -Eq '^(127\.0\.0\.1:4500|\[::1\]:4500)$'
+}
+wait_listener() {
+  local i
+  for i in $(seq 1 30); do
+    verify_loopback
+    listener_present && return 0
+    sleep 1
+  done
+  return 1
+}
+verify_codex() {
+  require_root
+  echo '=== Codex verification ==='
+  [[ -x "$CODEX_BIN" ]] || die "Codex binary missing."
+  "$CODEX_BIN" --version >/dev/null
+  [[ -L /usr/local/bin/codex ]] || die "Canonical codex link missing."
+  [[ -d "$CODEX_HOME_DIR" ]] || die "CODEX_HOME missing."
+  [[ -f "$SERVICE_FILE" ]] || die "App Server unit missing."
+  verify_loopback
+  if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+    systemctl is-active --quiet "$SERVICE" || die "Codex App Server is enabled but inactive."
+    listener_present || die "Codex App Server is active but not listening on 127.0.0.1:4500."
+  fi
+  echo 'CODEX: VERIFIED'
+}
+status() { version; echo "CODEX_HOME=$CODEX_HOME_DIR"; systemctl --no-pager --full status "$SERVICE" 2>/dev/null | sed -n '1,22p' || true; }
+doctor() { status; echo; ls -l "$CODEX_BIN" /usr/local/bin/codex 2>/dev/null || true; echo; ss -H -lntp | grep ':4500' || true; echo; journalctl -u "$SERVICE" -n 100 --no-pager 2>/dev/null || true; }
+app_start() { require_root; systemctl enable --now "$SERVICE"; systemctl is-active --quiet "$SERVICE" || die "Codex App Server failed."; wait_listener || { journalctl -u "$SERVICE" -n 100 --no-pager >&2; die "Codex App Server did not open 127.0.0.1:4500."; }; }
+app_stop() { require_root; systemctl stop "$SERVICE"; }
+app_restart() { require_root; systemctl restart "$SERVICE"; systemctl is-active --quiet "$SERVICE" || die "Codex App Server failed."; wait_listener || { journalctl -u "$SERVICE" -n 100 --no-pager >&2; die "Codex App Server did not open 127.0.0.1:4500."; }; }
+app_logs() { require_root; journalctl -u "$SERVICE" -n "${1:-200}" --no-pager; }
+project_add() {
+  begin
+  local p
+  p="$(readlink -f "${1:-}")"
+  [[ -n "$p" && -d "$p" && "$p" != / && "$p" != /root && "$p" != /srv && "$p" != /opt ]] || die "Use a narrow existing project directory."
+  touch "$PROJECTS_FILE"; chmod 0600 "$PROJECTS_FILE"
+  grep -Fxq "$p" "$PROJECTS_FILE" || echo "$p" >>"$PROJECTS_FILE"
+  sort -u -o "$PROJECTS_FILE" "$PROJECTS_FILE"
+  info "Registered project (advisory registry; Codex runs as root): $p"
+}
+project_remove() { begin; local p="${1:-}"; [[ -n "$p" ]] || die "Project path required."; [[ -f "$PROJECTS_FILE" ]] || return 0; grep -Fxv "$p" "$PROJECTS_FILE" >"${PROJECTS_FILE}.tmp" || true; mv "${PROJECTS_FILE}.tmp" "$PROJECTS_FILE"; chmod 0600 "$PROJECTS_FILE"; }
+projects() { [[ -f "$PROJECTS_FILE" ]] && cat "$PROJECTS_FILE" || true; }
+help() { cat <<EOF
+codex-manager $MANAGER_VERSION
+Lifecycle: install [VERSION] | repair | update [VERSION] | reinstall [VERSION] | check-update
+Inspection: status | verify | doctor | version
+CLI: cli [ARGS...] | login [ARGS...] | auth-status | logout | exec [ARGS...]
+App Server: app-server-start|stop|restart|status|logs [N]
+Projects: project-add PATH | project-remove PATH | projects
+Backup: backup [ABSOLUTE_FILE]
+Security: App Server is fixed to ws://127.0.0.1:4500. Non-local use requires TLS + WebSocket authentication.
+EOF
+}
+case "${1:-help}" in
+  install) install_codex "${2:-latest}";; repair) repair;; update) update "${2:-latest}";; reinstall) reinstall "${2:-latest}";; check-update) check_update;;
+  status) status;; verify) verify_codex;; doctor) doctor;; version) version;;
+  cli) shift; exec env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" "$@";;
+  login) shift; exec env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" login "$@";;
+  auth-status|login-status) exec env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" login status;;
+  logout) exec env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" logout;;
+  exec) shift; exec env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" exec "$@";;
+  app-server-start) app_start;; app-server-stop) app_stop;; app-server-restart) app_restart;; app-server-status) status;; app-server-logs) app_logs "${2:-200}";;
+  project-add) project_add "${2:-}";; project-remove) project_remove "${2:-}";; projects) projects;; backup) backup "${2:-}";;
+  help|-h|--help) help;; *) help; exit 2;;
+esac

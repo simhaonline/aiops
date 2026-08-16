@@ -1,0 +1,1080 @@
+#!/usr/bin/env bash
+# LEGACY SUPPORT SNAPSHOT
+# Suite archive: pre-1.0.1 internal manager lineage
+# This file is NOT installed on PATH and is preserved for rollback/reference only.
+# ==============================================================================
+# WireGuard Manager for Ubuntu 24.04 LTS
+# Manager version: 2.1.0
+#
+# One script for:
+#   - Install WireGuard
+#   - Uninstall WireGuard
+#   - Add a client/user
+#   - Remove a client/user
+#   - Show and export a client QR code
+#   - List clients
+#   - Show WireGuard status
+#
+# Defaults:
+#   Interface: wg0
+#   UDP port: 1320
+#   Dual stack: IPv4 + IPv6
+#   Client configs: /root/wireguard-clients
+# ==============================================================================
+
+readonly AIOPS_LEGACY_RELEASE="1.0.1"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+
+MANAGER_VERSION="2.1.0"
+WG_INTERFACE="wg0"
+WG_PORT="1320"
+WG_DIR="/etc/wireguard"
+WG_CONFIG="${WG_DIR}/${WG_INTERFACE}.conf"
+WG_ENV="${WG_DIR}/${WG_INTERFACE}.env"
+CLIENT_DIR="/root/wireguard-clients"
+CLIENT_META_DIR="${WG_DIR}/clients-${WG_INTERFACE}"
+SYSCTL_FILE="/etc/sysctl.d/99-wireguard-${WG_INTERFACE}.conf"
+LEGACY_SYSCTL_FILE="/etc/sysctl.d/99-wireguard.conf"
+SYSCTL_BACKUP="${WG_DIR}/sysctl-before-${WG_INTERFACE}.txt"
+UFW_POLICY_BACKUP="${WG_DIR}/ufw-forward-policy-before-${WG_INTERFACE}.txt"
+MANAGER_PATH="/usr/local/sbin/wireguard-manager"
+MTU="1380"
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+
+log() {
+    printf '\n==> %s\n' "$*"
+}
+
+warn() {
+    printf 'WARNING: %s\n' "$*" >&2
+}
+
+die() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+require_root() {
+    [[ ${EUID} -eq 0 ]] || die "Run this command as root, for example: sudo $0"
+}
+
+check_ubuntu() {
+    [[ -r /etc/os-release ]] || die "Cannot identify the operating system."
+
+    # shellcheck disable=SC1091
+    source /etc/os-release
+
+    [[ "${ID:-}" == "ubuntu" ]] || die "This script supports Ubuntu only."
+
+    if [[ "${VERSION_ID:-}" != "24.04" ]]; then
+        warn "Designed for Ubuntu 24.04 LTS; detected ${VERSION_ID:-unknown}."
+    fi
+}
+
+sanitize_client_name() {
+    local raw_name="${1:-}"
+    local clean_name
+
+    clean_name="$(printf '%s' "$raw_name" | tr -cs 'A-Za-z0-9_.-' '_')"
+    clean_name="${clean_name#_}"
+    clean_name="${clean_name%_}"
+
+    [[ -n "$clean_name" ]] || return 1
+    printf '%s' "$clean_name"
+}
+
+write_shell_variable() {
+    local file="$1"
+    local variable="$2"
+    local value="$3"
+
+    printf '%s=%q\n' "$variable" "$value" >> "$file"
+}
+
+load_environment() {
+    [[ -f "$WG_ENV" ]] || die "WireGuard is not installed by this manager."
+
+    # shellcheck disable=SC1090
+    source "$WG_ENV"
+}
+
+interface_is_active() {
+    ip link show "$WG_INTERFACE" >/dev/null 2>&1
+}
+
+client_metadata_file() {
+    printf '%s/%s.env' "$CLIENT_META_DIR" "$1"
+}
+
+client_exists() {
+    [[ -f "$(client_metadata_file "$1")" ]]
+}
+
+prompt_yes_no() {
+    local prompt="$1"
+    local answer
+
+    read -r -p "${prompt} [y/N]: " answer
+    [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+cidr_conflicts() {
+    local candidate="$1"
+    local family="$2"
+
+    python3 - "$candidate" "$family" <<'PY'
+import ipaddress
+import json
+import subprocess
+import sys
+
+candidate = ipaddress.ip_network(sys.argv[1], strict=False)
+family = sys.argv[2]
+
+try:
+    output = subprocess.check_output(
+        ["ip", "-j", f"-{family}", "route", "show", "table", "all"],
+        text=True,
+    )
+    routes = json.loads(output)
+except Exception:
+    sys.exit(2)
+
+for route in routes:
+    destination = route.get("dst")
+    if not destination or destination == "default":
+        continue
+
+    try:
+        network = ipaddress.ip_network(destination, strict=False)
+    except ValueError:
+        continue
+
+    if candidate.overlaps(network):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+select_ipv4_subnet() {
+    local candidate
+    local status
+    local candidates=(
+        "10.203.132.0/24"
+        "10.204.132.0/24"
+        "10.205.132.0/24"
+        "10.206.132.0/24"
+        "192.168.246.0/24"
+        "192.168.247.0/24"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if cidr_conflicts "$candidate" 4; then
+            continue
+        else
+            status=$?
+            [[ $status -eq 1 ]] || die "Could not inspect existing IPv4 routes."
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    die "No free built-in IPv4 VPN subnet was found."
+}
+
+select_ipv6_subnet() {
+    local candidate
+    local random_hex
+    local status
+
+    for _ in $(seq 1 30); do
+        random_hex="$(od -An -N5 -tx1 /dev/urandom | tr -d ' \n')"
+        candidate="fd${random_hex:0:2}:${random_hex:2:4}:${random_hex:6:4}::/64"
+
+        if cidr_conflicts "$candidate" 6; then
+            continue
+        else
+            status=$?
+            [[ $status -eq 1 ]] || die "Could not inspect existing IPv6 routes."
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    die "Could not generate a free IPv6 ULA subnet."
+}
+
+install_packages() {
+    log "Installing WireGuard and QR-code packages"
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        wireguard \
+        wireguard-tools \
+        qrencode \
+        iptables \
+        python3 \
+        ca-certificates
+}
+
+backup_sysctl_values() {
+    local key
+    local value
+    local keys=(
+        "net.ipv4.ip_forward"
+        "net.ipv6.conf.all.forwarding"
+        "net.ipv4.conf.all.src_valid_mark"
+        "net.ipv4.conf.all.rp_filter"
+        "net.ipv4.conf.default.rp_filter"
+        "net.ipv4.conf.all.accept_redirects"
+        "net.ipv4.conf.default.accept_redirects"
+        "net.ipv4.conf.all.send_redirects"
+        "net.ipv4.conf.default.send_redirects"
+        "net.ipv6.conf.all.accept_redirects"
+        "net.ipv6.conf.default.accept_redirects"
+        "net.core.rmem_max"
+        "net.core.wmem_max"
+        "net.core.rmem_default"
+        "net.core.wmem_default"
+        "net.core.netdev_max_backlog"
+        "net.ipv4.udp_rmem_min"
+        "net.ipv4.udp_wmem_min"
+    )
+
+    : > "$SYSCTL_BACKUP"
+    chmod 600 "$SYSCTL_BACKUP"
+
+    for key in "${keys[@]}"; do
+        if value="$(sysctl -n "$key" 2>/dev/null)"; then
+            printf '%s=%s\n' "$key" "$value" >> "$SYSCTL_BACKUP"
+        fi
+    done
+}
+
+apply_sysctl_settings() {
+    log "Applying forwarding, security, and UDP networking settings"
+
+    backup_sysctl_values
+
+    cat > "$SYSCTL_FILE" <<'SYSCTL'
+# WireGuard dual-stack routing
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.all.src_valid_mark = 1
+
+# Loose reverse-path filtering supports VPN and asymmetric routing.
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+
+# Reject unsafe ICMP redirects on a routed VPN server.
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+
+# Moderate socket and UDP tuning for encrypted tunnel traffic.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.netdev_max_backlog = 5000
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+SYSCTL
+
+    chmod 644 "$SYSCTL_FILE"
+    sysctl --system >/dev/null
+}
+
+restore_sysctl_settings() {
+    local key
+    local value
+
+    rm -f "$SYSCTL_FILE"
+    rm -f "$LEGACY_SYSCTL_FILE"
+
+    if [[ -f "$SYSCTL_BACKUP" ]]; then
+        while IFS='=' read -r key value; do
+            [[ -n "$key" ]] || continue
+            sysctl -w "${key}=${value}" >/dev/null 2>&1 || true
+        done < "$SYSCTL_BACKUP"
+    fi
+}
+
+configure_ufw() {
+    if ! command -v ufw >/dev/null 2>&1; then
+        return
+    fi
+
+    if ! ufw status | grep -q '^Status: active'; then
+        return
+    fi
+
+    log "Configuring UFW for WireGuard"
+
+    grep '^DEFAULT_FORWARD_POLICY=' /etc/default/ufw \
+        > "$UFW_POLICY_BACKUP" 2>/dev/null || true
+
+    ufw allow "${WG_PORT}/udp" >/dev/null
+
+    ufw route allow in on "$WG_INTERFACE" out on "$WAN_IF4" >/dev/null || true
+    ufw route allow in on "$WAN_IF4" out on "$WG_INTERFACE" >/dev/null || true
+
+    if [[ "$WAN_IF6" != "$WAN_IF4" ]]; then
+        ufw route allow in on "$WG_INTERFACE" out on "$WAN_IF6" >/dev/null || true
+        ufw route allow in on "$WAN_IF6" out on "$WG_INTERFACE" >/dev/null || true
+    fi
+
+    sed -i \
+        's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' \
+        /etc/default/ufw
+
+    ufw reload >/dev/null
+}
+
+remove_ufw_rules() {
+    local original_policy
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        return
+    fi
+
+    if [[ -n "${WG_PORT:-}" ]]; then
+        ufw --force delete allow "${WG_PORT}/udp" >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "${WAN_IF4:-}" ]]; then
+        ufw route delete allow in on "$WG_INTERFACE" out on "$WAN_IF4" \
+            >/dev/null 2>&1 || true
+        ufw route delete allow in on "$WAN_IF4" out on "$WG_INTERFACE" \
+            >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "${WAN_IF6:-}" && "${WAN_IF6:-}" != "${WAN_IF4:-}" ]]; then
+        ufw route delete allow in on "$WG_INTERFACE" out on "$WAN_IF6" \
+            >/dev/null 2>&1 || true
+        ufw route delete allow in on "$WAN_IF6" out on "$WG_INTERFACE" \
+            >/dev/null 2>&1 || true
+    fi
+
+    if [[ -s "$UFW_POLICY_BACKUP" ]]; then
+        original_policy="$(head -n 1 "$UFW_POLICY_BACKUP")"
+        if grep -q '^DEFAULT_FORWARD_POLICY=' /etc/default/ufw; then
+            sed -i "s/^DEFAULT_FORWARD_POLICY=.*/${original_policy}/" /etc/default/ufw
+        else
+            printf '\n%s\n' "$original_policy" >> /etc/default/ufw
+        fi
+    fi
+
+    ufw reload >/dev/null 2>&1 || true
+}
+
+next_client_host_number() {
+    python3 - "$VPN_IPV4_CIDR" "$CLIENT_META_DIR" <<'PY'
+import ipaddress
+import pathlib
+import re
+import shlex
+import sys
+
+network = ipaddress.ip_network(sys.argv[1], strict=False)
+metadata_directory = pathlib.Path(sys.argv[2])
+used_hosts = {1}
+
+for metadata_file in metadata_directory.glob("*.env"):
+    text = metadata_file.read_text(errors="ignore")
+    match = re.search(r'^CLIENT_IPV4=(.+)$', text, re.MULTILINE)
+
+    if not match:
+        continue
+
+    raw_value = match.group(1).strip()
+
+    try:
+        parsed = shlex.split(raw_value)
+        address_text = parsed[0] if parsed else raw_value
+        address = ipaddress.ip_address(address_text)
+    except (ValueError, IndexError):
+        continue
+
+    used_hosts.add(int(address) - int(network.network_address))
+
+for host_number in range(2, min(network.num_addresses - 1, 255)):
+    if host_number not in used_hosts:
+        print(host_number)
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+append_client_to_server_config() {
+    local client_name="$1"
+    local client_public_key="$2"
+    local client_preshared_key="$3"
+    local client_ipv4="$4"
+    local client_ipv6="$5"
+
+    cat >> "$WG_CONFIG" <<EOF
+
+# BEGIN_CLIENT ${client_name}
+[Peer]
+# Name = ${client_name}
+PublicKey = ${client_public_key}
+PresharedKey = ${client_preshared_key}
+AllowedIPs = ${client_ipv4}/32, ${client_ipv6}/128
+# END_CLIENT ${client_name}
+EOF
+
+    chmod 600 "$WG_CONFIG"
+}
+
+create_client() {
+    local requested_name="${1:-}"
+    local display_qr="${2:-yes}"
+    local client_name
+    local host_number
+    local host_hex
+    local client_ipv4
+    local client_ipv6
+    local client_private_key
+    local client_public_key
+    local client_preshared_key
+    local client_config
+    local client_qr
+    local metadata_file
+    local psk_file
+
+    load_environment
+
+    if [[ -z "$requested_name" ]]; then
+        read -r -p "Enter client name: " requested_name
+    fi
+
+    client_name="$(sanitize_client_name "$requested_name")" \
+        || die "Invalid client name."
+
+    client_exists "$client_name" && die "Client '${client_name}' already exists."
+
+    host_number="$(next_client_host_number)" \
+        || die "No free client IPv4 address remains in ${VPN_IPV4_CIDR}."
+
+    host_hex="$(printf '%x' "$host_number")"
+    client_ipv4="${IPV4_PREFIX}${host_number}"
+    client_ipv6="${IPV6_PREFIX}::${host_hex}"
+
+    client_private_key="$(wg genkey)"
+    client_public_key="$(printf '%s' "$client_private_key" | wg pubkey)"
+    client_preshared_key="$(wg genpsk)"
+
+    client_config="${CLIENT_DIR}/${client_name}.conf"
+    client_qr="${CLIENT_DIR}/${client_name}-qr.png"
+    metadata_file="$(client_metadata_file "$client_name")"
+
+    append_client_to_server_config \
+        "$client_name" \
+        "$client_public_key" \
+        "$client_preshared_key" \
+        "$client_ipv4" \
+        "$client_ipv6"
+
+    cat > "$client_config" <<EOF
+[Interface]
+PrivateKey = ${client_private_key}
+Address = ${client_ipv4}/32, ${client_ipv6}/128
+DNS = 1.1.1.1, 2606:4700:4700::1111
+MTU = ${MTU}
+
+[Peer]
+PublicKey = ${SERVER_PUBLIC_KEY}
+PresharedKey = ${client_preshared_key}
+Endpoint = ${WG_ENDPOINT}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+
+    qrencode -t PNG -o "$client_qr" -s 10 < "$client_config"
+
+    : > "$metadata_file"
+    write_shell_variable "$metadata_file" "CLIENT_NAME" "$client_name"
+    write_shell_variable "$metadata_file" "CLIENT_PUBLIC_KEY" "$client_public_key"
+    write_shell_variable "$metadata_file" "CLIENT_IPV4" "$client_ipv4"
+    write_shell_variable "$metadata_file" "CLIENT_IPV6" "$client_ipv6"
+    write_shell_variable "$metadata_file" "CLIENT_CONFIG" "$client_config"
+    write_shell_variable "$metadata_file" "CLIENT_QR" "$client_qr"
+
+    chmod 600 "$client_config" "$client_qr" "$metadata_file"
+
+    if interface_is_active; then
+        psk_file="$(mktemp)"
+        printf '%s\n' "$client_preshared_key" > "$psk_file"
+        chmod 600 "$psk_file"
+
+        wg set "$WG_INTERFACE" \
+            peer "$client_public_key" \
+            preshared-key "$psk_file" \
+            allowed-ips "${client_ipv4}/32,${client_ipv6}/128"
+
+        rm -f "$psk_file"
+    fi
+
+    printf '\nClient created successfully.\n'
+    printf 'Name:                 %s\n' "$client_name"
+    printf 'IPv4:                 %s\n' "$client_ipv4"
+    printf 'IPv6:                 %s\n' "$client_ipv6"
+    printf 'Client configuration: %s\n' "$client_config"
+    printf 'QR code PNG:          %s\n' "$client_qr"
+
+    if [[ "$display_qr" == "yes" ]]; then
+        printf '\nScan this QR code with the WireGuard application:\n\n'
+        qrencode -t ansiutf8 -m 2 < "$client_config"
+    fi
+}
+
+remove_client() {
+    local requested_name="${1:-}"
+    local client_name
+    local metadata_file
+    local temp_file
+
+    load_environment
+
+    if [[ -z "$requested_name" ]]; then
+        list_clients
+        printf '\n'
+        read -r -p "Enter client name to remove: " requested_name
+    fi
+
+    client_name="$(sanitize_client_name "$requested_name")" \
+        || die "Invalid client name."
+
+    metadata_file="$(client_metadata_file "$client_name")"
+    [[ -f "$metadata_file" ]] || die "Client '${client_name}' does not exist."
+
+    # shellcheck disable=SC1090
+    source "$metadata_file"
+
+    prompt_yes_no "Remove client '${client_name}' permanently?" || {
+        echo "Removal cancelled."
+        return 0
+    }
+
+    if interface_is_active; then
+        wg set "$WG_INTERFACE" peer "$CLIENT_PUBLIC_KEY" remove
+    fi
+
+    temp_file="$(mktemp)"
+
+    awk \
+        -v start="# BEGIN_CLIENT ${client_name}" \
+        -v end="# END_CLIENT ${client_name}" '
+            $0 == start { skip = 1; next }
+            $0 == end   { skip = 0; next }
+            !skip       { print }
+        ' "$WG_CONFIG" > "$temp_file"
+
+    install -m 600 "$temp_file" "$WG_CONFIG"
+    rm -f "$temp_file"
+
+    rm -f "$CLIENT_CONFIG" "$CLIENT_QR" "$metadata_file"
+
+    printf 'Client removed: %s\n' "$client_name"
+}
+
+show_client_qr() {
+    local requested_name="${1:-}"
+    local client_name
+    local metadata_file
+
+    load_environment
+
+    if [[ -z "$requested_name" ]]; then
+        list_clients
+        printf '\n'
+        read -r -p "Enter client name: " requested_name
+    fi
+
+    client_name="$(sanitize_client_name "$requested_name")" \
+        || die "Invalid client name."
+
+    metadata_file="$(client_metadata_file "$client_name")"
+    [[ -f "$metadata_file" ]] || die "Client '${client_name}' does not exist."
+
+    # shellcheck disable=SC1090
+    source "$metadata_file"
+
+    [[ -f "$CLIENT_CONFIG" ]] || die "Client configuration is missing: ${CLIENT_CONFIG}"
+
+    qrencode -t PNG -o "$CLIENT_QR" -s 10 < "$CLIENT_CONFIG"
+    chmod 600 "$CLIENT_QR"
+
+    printf '\nClient:      %s\n' "$client_name"
+    printf 'QR PNG file: %s\n\n' "$CLIENT_QR"
+    qrencode -t ansiutf8 -m 2 < "$CLIENT_CONFIG"
+}
+
+list_clients() {
+    local metadata_file
+    local found=0
+
+    load_environment
+
+    printf '%-24s %-16s %-30s\n' "CLIENT" "IPv4" "IPv6"
+    printf '%-24s %-16s %-30s\n' "------------------------" "----------------" "------------------------------"
+
+    shopt -s nullglob
+
+    for metadata_file in "$CLIENT_META_DIR"/*.env; do
+        # shellcheck disable=SC1090
+        source "$metadata_file"
+        printf '%-24s %-16s %-30s\n' \
+            "$CLIENT_NAME" "$CLIENT_IPV4" "$CLIENT_IPV6"
+        found=1
+    done
+
+    shopt -u nullglob
+
+    if [[ $found -eq 0 ]]; then
+        echo "No clients found."
+    fi
+}
+
+show_status() {
+    load_environment
+
+    printf 'WireGuard interface: %s\n' "$WG_INTERFACE"
+    printf 'UDP port:            %s\n' "$WG_PORT"
+    printf 'Endpoint:            %s\n' "$WG_ENDPOINT"
+    printf 'IPv4 VPN subnet:     %s\n' "$VPN_IPV4_CIDR"
+    printf 'IPv6 VPN subnet:     %s\n' "$VPN_IPV6_CIDR"
+    printf 'Service state:       '
+
+    systemctl is-active "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+
+    printf '\n'
+    wg show "$WG_INTERFACE" 2>/dev/null || true
+}
+
+install_manager_copy() {
+    if [[ "$SCRIPT_PATH" != "$MANAGER_PATH" ]]; then
+        install -m 700 "$SCRIPT_PATH" "$MANAGER_PATH"
+    else
+        chmod 700 "$MANAGER_PATH"
+    fi
+}
+
+install_wireguard() {
+    local endpoint_argument="${1:-}"
+    local first_client_argument="${2:-}"
+    local detected_ipv4
+    local detected_ipv6
+    local endpoint_host
+    local first_client
+    local server_private_key
+    local server_public_key
+
+    check_ubuntu
+
+    [[ ! -e "$WG_CONFIG" ]] \
+        || die "${WG_CONFIG} already exists. Use uninstall before reinstalling."
+
+    [[ ! -e "$WG_ENV" ]] \
+        || die "${WG_ENV} already exists. Use uninstall before reinstalling."
+
+    WAN_IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+    WAN_IF6="$(ip -6 route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+
+    [[ -n "$WAN_IF4" ]] || die "No IPv4 default route was found."
+    [[ -n "$WAN_IF6" ]] || die "No IPv6 default route was found."
+
+    ip -6 addr show dev "$WAN_IF6" scope global | grep -q 'inet6' \
+        || die "Interface ${WAN_IF6} does not have a global IPv6 address."
+
+    if ss -H -lun 2>/dev/null | awk '{print $5}' \
+        | grep -Eq "(^|[\]:])${WG_PORT}$"; then
+        die "UDP port ${WG_PORT} is already in use."
+    fi
+
+    detected_ipv4="$(
+        ip -4 addr show dev "$WAN_IF4" scope global \
+            | awk '/inet / {print $2; exit}' \
+            | cut -d/ -f1
+    )"
+
+    detected_ipv6="$(
+        ip -6 addr show dev "$WAN_IF6" scope global \
+            | awk '/inet6 / {print $2; exit}' \
+            | cut -d/ -f1
+    )"
+
+    printf '\nDetected server addresses:\n'
+    printf 'IPv4: %s\n' "${detected_ipv4:-not detected}"
+    printf 'IPv6: %s\n' "${detected_ipv6:-not detected}"
+    printf '\nThis is the VPN server address, not a DNS resolver such as 1.1.1.1.\n'
+
+    endpoint_host="$endpoint_argument"
+
+    if [[ -z "$endpoint_host" ]]; then
+        if [[ -n "$detected_ipv4" ]]; then
+            read -r -p "Server public IP or DNS name [${detected_ipv4}]: " endpoint_host
+            endpoint_host="${endpoint_host:-$detected_ipv4}"
+        else
+            read -r -p "Server public IP or DNS name: " endpoint_host
+        fi
+    fi
+
+    endpoint_host="${endpoint_host#[}"
+    endpoint_host="${endpoint_host%]}"
+    [[ -n "$endpoint_host" ]] || die "Server endpoint is required."
+
+    if [[ "$endpoint_host" == *:* ]]; then
+        WG_ENDPOINT="[${endpoint_host}]:${WG_PORT}"
+    else
+        WG_ENDPOINT="${endpoint_host}:${WG_PORT}"
+    fi
+
+    first_client="$first_client_argument"
+
+    if [[ -z "$first_client" ]]; then
+        read -r -p "First client name [client1]: " first_client
+        first_client="${first_client:-client1}"
+    fi
+
+    first_client="$(sanitize_client_name "$first_client")" \
+        || die "Invalid first client name."
+
+    VPN_IPV4_CIDR="$(select_ipv4_subnet)"
+    VPN_IPV6_CIDR="$(select_ipv6_subnet)"
+
+    IPV4_PREFIX="${VPN_IPV4_CIDR%0/24}"
+    IPV6_PREFIX="${VPN_IPV6_CIDR%::/64}"
+    SERVER_IPV4="${IPV4_PREFIX}1"
+    SERVER_IPV6="${IPV6_PREFIX}::1"
+
+    install_packages
+
+    install -d -m 700 "$WG_DIR" "$CLIENT_DIR" "$CLIENT_META_DIR"
+
+    server_private_key="$(wg genkey)"
+    server_public_key="$(printf '%s' "$server_private_key" | wg pubkey)"
+    SERVER_PUBLIC_KEY="$server_public_key"
+
+    apply_sysctl_settings
+
+    log "Writing WireGuard server configuration"
+
+    cat > "$WG_CONFIG" <<EOF
+[Interface]
+Address = ${SERVER_IPV4}/24, ${SERVER_IPV6}/64
+ListenPort = ${WG_PORT}
+PrivateKey = ${server_private_key}
+MTU = ${MTU}
+SaveConfig = false
+
+# Permit VPN forwarding before Docker or UFW forwarding chains.
+PostUp = iptables -C FORWARD -i %i -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i %i -j ACCEPT
+PostUp = iptables -C FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = ip6tables -C FORWARD -i %i -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -i %i -j ACCEPT
+PostUp = ip6tables -C FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# IPv4 NAT and IPv6 NAT66 provide full-tunnel internet access.
+PostUp = iptables -t nat -C POSTROUTING -s ${VPN_IPV4_CIDR} -o ${WAN_IF4} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${VPN_IPV4_CIDR} -o ${WAN_IF4} -j MASQUERADE
+PostUp = ip6tables -t nat -C POSTROUTING -s ${VPN_IPV6_CIDR} -o ${WAN_IF6} -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -s ${VPN_IPV6_CIDR} -o ${WAN_IF6} -j MASQUERADE
+
+PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = ip6tables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true
+PostDown = ip6tables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s ${VPN_IPV4_CIDR} -o ${WAN_IF4} -j MASQUERADE 2>/dev/null || true
+PostDown = ip6tables -t nat -D POSTROUTING -s ${VPN_IPV6_CIDR} -o ${WAN_IF6} -j MASQUERADE 2>/dev/null || true
+EOF
+
+    chmod 600 "$WG_CONFIG"
+
+    : > "$WG_ENV"
+    write_shell_variable "$WG_ENV" "WG_INTERFACE" "$WG_INTERFACE"
+    write_shell_variable "$WG_ENV" "WG_PORT" "$WG_PORT"
+    write_shell_variable "$WG_ENV" "WG_ENDPOINT" "$WG_ENDPOINT"
+    write_shell_variable "$WG_ENV" "WG_DIR" "$WG_DIR"
+    write_shell_variable "$WG_ENV" "WG_CONFIG" "$WG_CONFIG"
+    write_shell_variable "$WG_ENV" "CLIENT_DIR" "$CLIENT_DIR"
+    write_shell_variable "$WG_ENV" "CLIENT_META_DIR" "$CLIENT_META_DIR"
+    write_shell_variable "$WG_ENV" "VPN_IPV4_CIDR" "$VPN_IPV4_CIDR"
+    write_shell_variable "$WG_ENV" "VPN_IPV6_CIDR" "$VPN_IPV6_CIDR"
+    write_shell_variable "$WG_ENV" "IPV4_PREFIX" "$IPV4_PREFIX"
+    write_shell_variable "$WG_ENV" "IPV6_PREFIX" "$IPV6_PREFIX"
+    write_shell_variable "$WG_ENV" "SERVER_IPV4" "$SERVER_IPV4"
+    write_shell_variable "$WG_ENV" "SERVER_IPV6" "$SERVER_IPV6"
+    write_shell_variable "$WG_ENV" "SERVER_PUBLIC_KEY" "$SERVER_PUBLIC_KEY"
+    write_shell_variable "$WG_ENV" "WAN_IF4" "$WAN_IF4"
+    write_shell_variable "$WG_ENV" "WAN_IF6" "$WAN_IF6"
+    write_shell_variable "$WG_ENV" "MTU" "$MTU"
+
+    chmod 600 "$WG_ENV"
+
+    create_client "$first_client" "no"
+    configure_ufw
+    install_manager_copy
+
+    systemctl enable --now "wg-quick@${WG_INTERFACE}"
+
+    if ! systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+        systemctl status "wg-quick@${WG_INTERFACE}" --no-pager || true
+        die "WireGuard failed to start."
+    fi
+
+    printf '\nWireGuard installation completed successfully.\n'
+    printf 'Endpoint:        %s\n' "$WG_ENDPOINT"
+    printf 'UDP port:        %s\n' "$WG_PORT"
+    printf 'IPv4 VPN subnet: %s\n' "$VPN_IPV4_CIDR"
+    printf 'IPv6 VPN subnet: %s\n' "$VPN_IPV6_CIDR"
+    printf 'Manager command: %s\n' "$MANAGER_PATH"
+    printf '\nAllow UDP port %s in your VPS provider firewall as well.\n' "$WG_PORT"
+
+    show_client_qr "$first_client"
+}
+
+uninstall_wireguard() {
+    local purge_packages="${1:-no}"
+
+    if [[ -f "$WG_ENV" ]]; then
+        # shellcheck disable=SC1090
+        source "$WG_ENV"
+    fi
+
+    if [[ ! -e "$WG_CONFIG" && ! -e "$WG_ENV" ]]; then
+        warn "WireGuard manager configuration is already absent."
+    fi
+
+    if [[ "$purge_packages" != "yes" ]]; then
+        prompt_yes_no "Uninstall WireGuard configuration?" || {
+            echo "Uninstall cancelled."
+            return 0
+        }
+    fi
+
+    log "Stopping WireGuard"
+
+    systemctl disable --now "wg-quick@${WG_INTERFACE}" \
+        >/dev/null 2>&1 || true
+
+    remove_ufw_rules
+    restore_sysctl_settings
+
+    rm -f "$WG_CONFIG"
+    rm -f "$WG_ENV"
+    rm -f "$SYSCTL_BACKUP"
+    rm -f "$UFW_POLICY_BACKUP"
+    rm -rf "$CLIENT_META_DIR"
+    rm -rf "$CLIENT_DIR"
+    rm -f "$MANAGER_PATH"
+    rm -f /usr/local/sbin/wg-add-user /usr/local/sbin/wg-remove-user
+
+    rmdir "$WG_DIR" >/dev/null 2>&1 || true
+
+    if [[ "$purge_packages" == "yes" ]]; then
+        log "Removing WireGuard and QR-code packages"
+        apt-get purge -y wireguard wireguard-tools qrencode
+    else
+        if prompt_yes_no "Also remove WireGuard and QR-code packages?"; then
+            apt-get purge -y wireguard wireguard-tools qrencode
+            fi
+    fi
+
+    echo "WireGuard configuration has been removed."
+}
+
+verify_wireguard() {
+    require_root
+    check_ubuntu
+    load_environment
+
+    echo "=== WireGuard verification ==="
+    echo "[1/7] Managed files"
+    [[ -f "$WG_CONFIG" && -f "$WG_ENV" ]] || die "Managed WireGuard files are missing."
+    [[ "$(stat -c '%a' "$WG_CONFIG")" == "600" ]] || die "$WG_CONFIG must be mode 600."
+    [[ "$(stat -c '%a' "$WG_ENV")" == "600" ]] || die "$WG_ENV must be mode 600."
+
+    echo "[2/7] WireGuard tools"
+    command -v wg >/dev/null 2>&1 || die "wg is missing."
+    command -v wg-quick >/dev/null 2>&1 || die "wg-quick is missing."
+
+    echo "[3/7] Service"
+    systemctl is-enabled --quiet "wg-quick@${WG_INTERFACE}" || die "wg-quick@${WG_INTERFACE} is not enabled."
+    systemctl is-active --quiet "wg-quick@${WG_INTERFACE}" || die "wg-quick@${WG_INTERFACE} is not active."
+
+    echo "[4/7] Interface"
+    ip link show "$WG_INTERFACE" >/dev/null 2>&1 || die "Interface ${WG_INTERFACE} is missing."
+    wg show "$WG_INTERFACE" >/dev/null 2>&1 || die "wg show ${WG_INTERFACE} failed."
+
+    echo "[5/7] Listener"
+    ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "(^|[\\]:])${WG_PORT}$" || \
+        warn "UDP ${WG_PORT} not found in ss output; inspect firewall/NAT if clients fail."
+
+    echo "[6/7] Forwarding"
+    [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] || die "IPv4 forwarding is disabled."
+    if [[ -n "${VPN_IPV6_CIDR:-}" ]]; then
+        [[ "$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo 0)" == "1" ]] || die "IPv6 forwarding is disabled."
+    fi
+
+    echo "[7/7] Client permissions"
+    if [[ -d "$CLIENT_DIR" ]]; then
+        local bad=""
+        bad="$(find "$CLIENT_DIR" -type f -perm /077 -print -quit 2>/dev/null || true)"
+        [[ -z "$bad" ]] || die "Client file is too permissive: $bad"
+    fi
+
+    echo
+    echo "WIREGUARD: VERIFIED"
+    echo "Manager:   $MANAGER_VERSION"
+    echo "Interface: $WG_INTERFACE"
+    echo "Endpoint:  ${WG_ENDPOINT:-unknown}"
+    echo "Port:      $WG_PORT/udp"
+}
+
+restart_wireguard() {
+    require_root
+    load_environment
+    systemctl restart "wg-quick@${WG_INTERFACE}"
+    systemctl is-active --quiet "wg-quick@${WG_INTERFACE}" || die "WireGuard restart failed."
+}
+
+logs_wireguard() {
+    require_root
+    load_environment
+    journalctl -u "wg-quick@${WG_INTERFACE}" -n 200 --no-pager
+}
+
+show_version() {
+    echo "wireguard-manager $MANAGER_VERSION"
+    wg --version 2>/dev/null || true
+}
+
+show_help() {
+    cat <<EOF
+WireGuard Manager v$MANAGER_VERSION
+
+Usage:
+  sudo $0
+  sudo $0 install [SERVER_IP_OR_DNS] [FIRST_CLIENT]
+  sudo $0 add-user [CLIENT_NAME]
+  sudo $0 remove-user [CLIENT_NAME]
+  sudo $0 show-qr [CLIENT_NAME]
+  sudo $0 list-users
+  sudo $0 status
+  sudo $0 verify
+  sudo $0 restart
+  sudo $0 logs
+  sudo $0 version
+  sudo $0 uninstall
+  sudo $0 uninstall --purge
+  sudo $0 help
+
+Examples:
+  sudo $0 install 152.53.67.111 mobile
+  sudo $0 add-user laptop
+  sudo $0 show-qr laptop
+  sudo $0 remove-user laptop
+EOF
+}
+
+interactive_menu() {
+    local choice
+
+    while true; do
+        cat <<'MENU'
+
+============================================================
+ WireGuard Manager
+============================================================
+  1) Install WireGuard
+  2) Add user/client
+  3) Remove user/client
+  4) Show client QR code
+  5) List users/clients
+  6) Show WireGuard status
+  7) Uninstall WireGuard
+  0) Exit
+============================================================
+MENU
+
+        read -r -p "Select an option: " choice
+
+        case "$choice" in
+            1) install_wireguard ;;
+            2) create_client ;;
+            3) remove_client ;;
+            4) show_client_qr ;;
+            5) list_clients ;;
+            6) show_status ;;
+            7) uninstall_wireguard; exit 0 ;;
+            0) exit 0 ;;
+            *) echo "Invalid option." ;;
+        esac
+    done
+}
+
+main() {
+    local command="${1:-menu}"
+
+    require_root
+
+    case "$command" in
+        menu)
+            interactive_menu
+            ;;
+        install)
+            install_wireguard "${2:-}" "${3:-}"
+            ;;
+        add-user|add)
+            create_client "${2:-}"
+            ;;
+        remove-user|remove)
+            remove_client "${2:-}"
+            ;;
+        show-qr|qr)
+            show_client_qr "${2:-}"
+            ;;
+        list-users|list)
+            list_clients
+            ;;
+        status)
+            show_status
+            ;;
+        verify)
+            verify_wireguard
+            ;;
+        restart)
+            restart_wireguard
+            ;;
+        logs)
+            logs_wireguard
+            ;;
+        version)
+            show_version
+            ;;
+        uninstall)
+            if [[ "${2:-}" == "--purge" ]]; then
+                uninstall_wireguard "yes"
+            else
+                uninstall_wireguard "no"
+            fi
+            ;;
+        help|-h|--help)
+            show_help
+            ;;
+        *)
+            die "Unknown command '${command}'. Run '$0 help'."
+            ;;
+    esac
+}
+
+main "$@"

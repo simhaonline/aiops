@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# LEGACY SUPPORT SNAPSHOT
+# Suite archive: pre-1.0.1 internal manager lineage
+# This file is NOT installed on PATH and is preserved for rollback/reference only.
+readonly AIOPS_LEGACY_RELEASE="1.0.1"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 027
+
+# opencode-manager v1.0.0
+# Ubuntu 24.04 LTS
+# OpenCode CLI/TUI + authenticated localhost Web server.
+
+readonly MANAGER_VERSION="1.0.0"
+readonly MANAGER_PATH="/usr/local/bin/opencode-manager"
+readonly LOCK_FILE="/run/lock/opencode-manager.lock"
+
+log()  { printf '\n==> %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+on_error() { local rc=$?; printf '[ERROR] Command failed at line %s (exit %s).\n' "${BASH_LINENO[0]:-?}" "$rc" >&2; exit "$rc"; }
+trap on_error ERR
+require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root."; }
+require_ubuntu() { [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."; . /etc/os-release; [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || die "Ubuntu 24.04 LTS required."; }
+lock() { install -d -m 0755 /run/lock; exec 9>"$LOCK_FILE"; flock -w 120 9 || die "Another opencode-manager operation is active."; }
+self_install() { local s; s="$(readlink -f "${BASH_SOURCE[0]}")"; if [[ "$s" != "$MANAGER_PATH" ]]; then install -o root -g root -m 0755 "$s" "$MANAGER_PATH"; fi; }
+begin() { require_root; require_ubuntu; lock; self_install; }
+
+readonly NVM_DIR="/root/.nvm"
+readonly NODE_BIN_LINK="${NVM_DIR}/default-bin"
+require_nvm() {
+  [[ -x /usr/local/bin/nvm-manager ]] || die "nvm-manager is required."
+  [[ -s "$NVM_DIR/nvm.sh" ]] || die "NVM runtime missing."
+  /usr/local/bin/nvm-manager verify >/dev/null
+}
+node_cmd() {
+  bash --noprofile --norc -c 'set -Eeuo pipefail; export NVM_DIR=/root/.nvm; . "$NVM_DIR/nvm.sh" --no-use; nvm use default >/dev/null; exec "$@"' bash "$@"
+}
+npm_install() { node_cmd npm install --global "$1"; }
+
+readonly PACKAGE="opencode-ai"
+readonly BIN="${NODE_BIN_LINK}/opencode"
+readonly WRAPPER="/usr/local/bin/opencode"
+readonly SERVICE="opencode-web.service"
+readonly UNIT="/etc/systemd/system/${SERVICE}"
+readonly CONF_DIR="/etc/opencode-manager"
+readonly ENV_FILE="${CONF_DIR}/server.env"
+readonly HOST="127.0.0.1"
+readonly PORT="4096"
+
+install_deps() { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq util-linux openssl; }
+install_package() { npm_install "${PACKAGE}@${1:-latest}"; }
+write_wrapper() { cat >"$WRAPPER" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec ${BIN} "\$@"
+EOF
+chmod 0755 "$WRAPPER"; }
+ensure_env() {
+  install -d -o root -g root -m 0755 "$CONF_DIR"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    local p; p="$(openssl rand -hex 32)"
+    printf 'OPENCODE_SERVER_USERNAME=opencode\nOPENCODE_SERVER_PASSWORD=%s\nOPENCODE_DISABLE_AUTOUPDATE=true\n' "$p" >"$ENV_FILE"
+  fi
+  chown root:root "$ENV_FILE"; chmod 0600 "$ENV_FILE"
+}
+write_unit() { cat >"$UNIT" <<EOF
+[Unit]
+Description=OpenCode Web (localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+EnvironmentFile=${ENV_FILE}
+ExecStart=${BIN} web --hostname ${HOST} --port ${PORT}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 "$UNIT"; systemctl daemon-reload; }
+install_oc() { begin; install_deps; require_nvm; install_package latest; write_wrapper; ensure_env; write_unit; verify_oc; }
+repair() { begin; install_deps; require_nvm; [[ -x "$BIN" ]] || install_package latest; write_wrapper; ensure_env; write_unit; verify_oc; }
+reinstall() { begin; install_deps; require_nvm; backup >/dev/null; install_package latest; write_wrapper; ensure_env; write_unit; if systemctl is-active --quiet "$SERVICE"; then systemctl restart "$SERVICE"; fi; verify_oc; }
+update() { begin; require_nvm; install_package latest; write_wrapper; if systemctl is-active --quiet "$SERVICE"; then systemctl restart "$SERVICE"; fi; verify_oc; }
+check_update() { require_root; require_nvm; echo "installed=$($BIN --version 2>/dev/null || true)"; echo "latest=$(node_cmd npm view "$PACKAGE" version)"; }
+version() { echo "opencode-manager $MANAGER_VERSION"; [[ -x "$BIN" ]] && "$BIN" --version || true; }
+loopcheck() { local bad; bad="$(ss -H -lnt 2>/dev/null | awk '$4 ~ /:4096$/ {print $4}' | grep -Ev '^(127\.0\.0\.1:4096|\[::1\]:4096)$' || true)"; [[ -z "$bad" ]] || die "Unsafe OpenCode listener: $bad"; }
+listener_present() { ss -H -lnt 2>/dev/null | awk '{print $4}' | grep -Eq '^(127\.0\.0\.1:4096|\[::1\]:4096)$'; }
+wait_listener() { local i; for i in $(seq 1 30); do loopcheck; listener_present && return 0; sleep 1; done; return 1; }
+verify_oc() { require_root; echo '=== OpenCode verification ==='; require_nvm; [[ -x "$BIN" ]] || die "OpenCode missing."; "$BIN" --version >/dev/null; [[ -x "$WRAPPER" && -f "$ENV_FILE" && -f "$UNIT" ]] || die "Managed files missing."; [[ "$(stat -c %a "$ENV_FILE")" == 600 ]] || die "Server secret must be 0600."; grep -Fq 'OPENCODE_SERVER_PASSWORD=' "$ENV_FILE" || die "Server password missing."; loopcheck; if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then systemctl is-active --quiet "$SERVICE" || die "OpenCode Web is enabled but inactive."; listener_present || die "OpenCode Web is active but not listening on 127.0.0.1:4096."; fi; echo 'OPENCODE: VERIFIED'; }
+status() { version; systemctl --no-pager --full status "$SERVICE" 2>/dev/null | sed -n '1,22p' || true; }
+web_start() { require_root; systemctl enable --now "$SERVICE"; systemctl is-active --quiet "$SERVICE" || die "OpenCode Web failed."; wait_listener || { journalctl -u "$SERVICE" -n 100 --no-pager >&2; die "OpenCode Web did not open 127.0.0.1:4096."; }; }
+web_stop() { require_root; systemctl stop "$SERVICE"; }
+web_restart() { require_root; systemctl restart "$SERVICE"; systemctl is-active --quiet "$SERVICE" || die "OpenCode Web failed."; wait_listener || { journalctl -u "$SERVICE" -n 100 --no-pager >&2; die "OpenCode Web did not open 127.0.0.1:4096."; }; }
+logs() { require_root; journalctl -u "$SERVICE" -n "${1:-200}" --no-pager; }
+doctor() { status; echo; node_cmd npm list -g --depth=0 "$PACKAGE" 2>/dev/null || true; echo; ss -H -lntp | grep ':4096' || true; echo; logs 80 || true; }
+backup() { require_root; local out="${1:-/root/opencode-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}" items=(); [[ "$out" == /* ]] || die "Backup path must be absolute."; [[ -d /root/.config/opencode ]] && items+=(.config/opencode); [[ -d /root/.local/share/opencode ]] && items+=(.local/share/opencode); if ((${#items[@]})); then tar -C /root -czf "$out" "${items[@]}"; else tar -czf "$out" --files-from /dev/null; fi; chmod 0600 "$out"; echo "$out"; }
+help() { cat <<EOF
+opencode-manager $MANAGER_VERSION
+Lifecycle: install | repair | update | reinstall | check-update
+Inspection: status | verify | doctor | version
+CLI: cli [ARGS...] | run [ARGS...] | auth [ARGS...] | mcp [ARGS...] | models [ARGS...]
+Web: web-start|stop|restart|status|logs [N]
+Backup: backup [FILE]
+Server: http://127.0.0.1:4096 with OpenCode's own Basic Auth; auto-update checks disabled for manager-controlled lifecycle.
+EOF
+}
+case "${1:-help}" in
+  install) install_oc;; repair) repair;; update) update;; reinstall) reinstall;; check-update) check_update;; status) status;; verify) verify_oc;; doctor) doctor;; version) version;;
+  cli) shift; exec "$BIN" "$@";; run) shift; exec "$BIN" run "$@";; auth) shift; exec "$BIN" auth "$@";; mcp) shift; exec "$BIN" mcp "$@";; models) shift; exec "$BIN" models "$@";;
+  web-start) web_start;; web-stop) web_stop;; web-restart) web_restart;; web-status) status;; web-logs) logs "${2:-200}";; backup) backup "${2:-}";;
+  help|-h|--help) help;; *) help; exit 2;;
+esac

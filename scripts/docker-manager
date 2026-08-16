@@ -1,0 +1,1165 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+# =============================================================================
+# Docker Dual Manager - Host + Rootless - Ubuntu 24.04 LTS
+# Manager version: 1.0.1
+#
+# Single lifecycle manager for TWO independent Docker Engine daemons:
+#   1) HOST/ROOTFUL Docker: system docker.service + /var/run/docker.sock
+#   2) ROOTLESS Docker:    docker-rootless user service + /run/user/UID/docker.sock
+#
+# Both can run simultaneously. They intentionally use separate containers, images,
+# volumes, networks and daemon state. The rootless account is never added to the
+# privileged docker group.
+#
+# Default dedicated unprivileged account:
+#   docker-rootless
+#
+# Override before install if desired:
+#   ROOTLESS_USER=mydocker ROOTLESS_HOME=/var/lib/mydocker ./docker-manager install
+#
+# Main commands:
+#   install | update | reinstall | optimize | start | stop | restart
+#   status | verify | doctor | logs | env
+#   host ... | rootless ... | host-compose ... | rootless-compose ...
+#   remove | purge | repo | help
+# =============================================================================
+
+readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_PATH="${MANAGER_PATH:-/usr/local/bin/docker-manager}"
+readonly DOCKER_KEYRING="/etc/apt/keyrings/docker.asc"
+readonly DOCKER_SOURCES="/etc/apt/sources.list.d/docker.sources"
+readonly LOCK_FILE="/run/lock/docker-manager.lock"
+readonly HOST_DOCKER_SOCKET="/var/run/docker.sock"
+readonly HOST_DAEMON_CONFIG="/etc/docker/daemon.json"
+
+ROOTLESS_USER="${ROOTLESS_USER:-docker-rootless}"
+ROOTLESS_HOME="${ROOTLESS_HOME:-/var/lib/${ROOTLESS_USER}}"
+
+APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-600}"
+LOG_LINES="${LOG_LINES:-200}"
+MAX_CONCURRENT_DOWNLOADS="${MAX_CONCURRENT_DOWNLOADS:-auto}"
+MAX_CONCURRENT_UPLOADS="${MAX_CONCURRENT_UPLOADS:-auto}"
+
+readonly -a DOCKER_PACKAGES=(
+  docker-ce
+  docker-ce-cli
+  containerd.io
+  docker-buildx-plugin
+  docker-compose-plugin
+  docker-ce-rootless-extras
+)
+
+readonly -a ROOTLESS_PREREQS=(
+  uidmap
+  dbus-user-session
+  systemd-container
+  ca-certificates
+  curl
+)
+
+readonly -a CONFLICT_PACKAGES=(
+  docker.io
+  docker-compose
+  docker-compose-v2
+  docker-doc
+  docker-buildx
+  podman-docker
+  containerd
+  runc
+)
+
+log()  { printf '\n==> %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+
+on_error() {
+  local rc=$?
+  printf '[ERROR] Command failed at line %s (exit %s): %s\n' "${BASH_LINENO[0]:-?}" "$rc" "${BASH_COMMAND:-?}" >&2
+  exit "$rc"
+}
+trap on_error ERR
+
+require_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run this manager as root: sudo $0 ${1:-status}"
+}
+
+require_ubuntu_2404() {
+  [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release"
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  [[ "${ID:-}" == "ubuntu" ]] || die "Ubuntu is required. Found: ${PRETTY_NAME:-unknown}"
+  [[ "${VERSION_ID:-}" == "24.04" ]] || die "Validated for Ubuntu 24.04 LTS. Found: ${PRETTY_NAME:-unknown}"
+}
+
+validate_user_name() {
+  [[ "$ROOTLESS_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "Invalid ROOTLESS_USER: $ROOTLESS_USER"
+  [[ "$ROOTLESS_USER" != "root" ]] || die "Rootless Docker cannot use the root account."
+  [[ "$ROOTLESS_HOME" == /* ]] || die "ROOTLESS_HOME must be an absolute path."
+}
+
+acquire_lock() {
+  install -d -m 0755 "$(dirname "$LOCK_FILE")"
+  exec 9>"$LOCK_FILE"
+  flock -w 30 9 || die "Another docker-manager process is already running."
+}
+
+apt_cmd() {
+  DEBIAN_FRONTEND=noninteractive apt-get \
+    -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" \
+    -o Acquire::Retries=3 \
+    "$@"
+}
+
+self_install() {
+  local src
+  src="$(readlink -f "${BASH_SOURCE[0]}")"
+  [[ "$src" == "$MANAGER_PATH" ]] && return 0
+  install -m 0755 "$src" "$MANAGER_PATH"
+  info "Manager installed at $MANAGER_PATH"
+}
+
+user_exists() {
+  id "$ROOTLESS_USER" >/dev/null 2>&1
+}
+
+refresh_identity() {
+  user_exists || return 1
+  local passwd_home
+  passwd_home="$(getent passwd "$ROOTLESS_USER" | cut -d: -f6)"
+  [[ -n "$passwd_home" ]] || die "Unable to determine home directory for $ROOTLESS_USER"
+  ROOTLESS_HOME="$passwd_home"
+}
+
+rootless_uid() { id -u "$ROOTLESS_USER"; }
+rootless_gid() { id -g "$ROOTLESS_USER"; }
+runtime_dir() { printf '/run/user/%s' "$(rootless_uid)"; }
+docker_socket() { printf '%s/docker.sock' "$(runtime_dir)"; }
+docker_host() { printf 'unix://%s' "$(docker_socket)"; }
+service_file() { printf '%s/.config/systemd/user/docker.service' "$ROOTLESS_HOME"; }
+override_file() { printf '%s/.config/systemd/user/docker.service.d/10-performance.conf' "$ROOTLESS_HOME"; }
+daemon_config() { printf '%s/.config/docker/daemon.json' "$ROOTLESS_HOME"; }
+data_dir() { printf '%s/.local/share/docker' "$ROOTLESS_HOME"; }
+
+configure_repo() {
+  require_ubuntu_2404
+
+  apt_cmd update
+  apt_cmd install -y ca-certificates curl
+
+  install -d -m 0755 /etc/apt/keyrings
+  curl --fail --silent --show-error --location \
+    https://download.docker.com/linux/ubuntu/gpg \
+    -o "$DOCKER_KEYRING"
+  chmod a+r "$DOCKER_KEYRING"
+
+  local arch codename
+  arch="$(dpkg --print-architecture)"
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  codename="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+
+  cat >"$DOCKER_SOURCES" <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $codename
+Components: stable
+Architectures: $arch
+Signed-By: $DOCKER_KEYRING
+EOF
+
+  apt_cmd update
+}
+
+remove_conflicts() {
+  local installed=() pkg
+
+  for pkg in "${CONFLICT_PACKAGES[@]}"; do
+    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
+      installed+=("$pkg")
+    fi
+  done
+
+  if ((${#installed[@]})); then
+    warn "Removing packages that conflict with Docker CE: ${installed[*]}"
+    apt_cmd remove -y "${installed[@]}"
+  fi
+}
+
+install_packages() {
+  log "Installing Docker Engine packages and rootless prerequisites"
+  apt_cmd install -y "${ROOTLESS_PREREQS[@]}" "${DOCKER_PACKAGES[@]}"
+}
+
+host_docker() {
+  command -v docker >/dev/null 2>&1 || die "Docker CLI is not installed."
+  docker --host "unix://${HOST_DOCKER_SOCKET}" "$@"
+}
+
+wait_for_host_daemon() {
+  local i
+  for i in $(seq 1 30); do
+    if [[ -S "$HOST_DOCKER_SOCKET" ]] && host_docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  journalctl -u docker.service -n "$LOG_LINES" --no-pager 2>/dev/null || true
+  die "Host/rootful Docker did not become ready."
+}
+
+ensure_host_docker() {
+  log "Enabling host/rootful Docker"
+  systemctl enable docker.service >/dev/null 2>&1 || true
+  systemctl enable docker.socket >/dev/null 2>&1 || true
+  systemctl start docker.socket >/dev/null 2>&1 || true
+  systemctl start docker.service
+  wait_for_host_daemon
+}
+
+ensure_rootless_user() {
+  validate_user_name
+
+  if user_exists; then
+    refresh_identity
+    [[ "$(rootless_uid)" -ne 0 ]] || die "The selected account resolves to UID 0."
+    info "Using rootless account: $ROOTLESS_USER (home: $ROOTLESS_HOME)"
+  else
+    log "Creating dedicated unprivileged account: $ROOTLESS_USER"
+    if getent group "$ROOTLESS_USER" >/dev/null 2>&1; then
+      useradd --create-home --home-dir "$ROOTLESS_HOME" --shell /bin/bash --gid "$ROOTLESS_USER" "$ROOTLESS_USER"
+    else
+      useradd --create-home --home-dir "$ROOTLESS_HOME" --shell /bin/bash --user-group "$ROOTLESS_USER"
+    fi
+    passwd -l "$ROOTLESS_USER" >/dev/null 2>&1 || true
+    refresh_identity
+    touch "$ROOTLESS_HOME/.docker-manager-owned"
+    chown "$ROOTLESS_USER:$ROOTLESS_USER" "$ROOTLESS_HOME/.docker-manager-owned"
+    chmod 0600 "$ROOTLESS_HOME/.docker-manager-owned"
+  fi
+
+  # Rootless mode must not rely on membership in the root-equivalent docker group.
+  if getent group docker >/dev/null 2>&1 && id -nG "$ROOTLESS_USER" | tr ' ' '\n' | grep -qx docker; then
+    gpasswd -d "$ROOTLESS_USER" docker >/dev/null 2>&1 || true
+  fi
+}
+
+subid_sufficient() {
+  local file="$1"
+  awk -F: -v u="$ROOTLESS_USER" '$1==u && $3>=65536 {ok=1} END{exit !ok}' "$file" 2>/dev/null
+}
+
+next_subid_start() {
+  local file="$1"
+  awk -F: '
+    BEGIN { maxend=100000 }
+    NF==3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {
+      end=$2+$3
+      if (end>maxend) maxend=end
+    }
+    END {
+      block=65536
+      start=maxend
+      rem=start%block
+      if (rem!=0) start += block-rem
+      if (start<100000) start=100000
+      print start
+    }
+  ' "$file" 2>/dev/null
+}
+
+ensure_subids() {
+  touch /etc/subuid /etc/subgid
+  chmod 0644 /etc/subuid /etc/subgid
+
+  local file start
+  for file in /etc/subuid /etc/subgid; do
+    if ! subid_sufficient "$file"; then
+      start="$(next_subid_start "$file")"
+      printf '%s:%s:65536\n' "$ROOTLESS_USER" "$start" >>"$file"
+      info "Allocated subordinate IDs in $file: $ROOTLESS_USER:$start:65536"
+    fi
+  done
+}
+
+ensure_user_namespaces() {
+  local sysctl_file="/etc/sysctl.d/99-docker-rootless.conf"
+  local need_reload=0 current
+  local settings=()
+
+  if [[ -r /proc/sys/kernel/unprivileged_userns_clone ]]; then
+    current="$(cat /proc/sys/kernel/unprivileged_userns_clone)"
+    if [[ "$current" == "0" ]]; then
+      settings+=("kernel.unprivileged_userns_clone=1")
+      need_reload=1
+    fi
+  fi
+
+  if [[ -r /proc/sys/user/max_user_namespaces ]]; then
+    current="$(cat /proc/sys/user/max_user_namespaces)"
+    if [[ "$current" =~ ^[0-9]+$ ]] && (( current < 28633 )); then
+      settings+=("user.max_user_namespaces=28633")
+      need_reload=1
+    fi
+  fi
+
+  if (( need_reload )); then
+    printf '%s\n' "${settings[@]}" >"$sysctl_file"
+    sysctl --system >/dev/null
+    info "Enabled the kernel user-namespace settings required by rootless containers."
+  fi
+}
+
+ensure_kernel_modules() {
+  local module
+  for module in ip_tables iptable_mangle iptable_nat iptable_filter br_netfilter; do
+    modprobe "$module" 2>/dev/null || true
+  done
+}
+
+ensure_local_storage() {
+  install -d -o "$ROOTLESS_USER" -g "$ROOTLESS_USER" -m 0700 "$ROOTLESS_HOME"
+
+  local fstype
+  fstype="$(findmnt -n -o FSTYPE -T "$ROOTLESS_HOME" 2>/dev/null || true)"
+  case "$fstype" in
+    nfs|nfs4|cifs|smb3|fuse.sshfs)
+      die "Rootless Docker data must not live on $fstype. Move ROOTLESS_HOME to a local filesystem."
+      ;;
+  esac
+}
+
+ensure_user_session() {
+  local uid bus i
+  uid="$(rootless_uid)"
+  bus="/run/user/$uid/bus"
+
+  loginctl enable-linger "$ROOTLESS_USER" >/dev/null
+  systemctl start "user@${uid}.service"
+
+  for i in $(seq 1 30); do
+    [[ -S "$bus" ]] && return 0
+    sleep 1
+  done
+
+  systemctl --no-pager --full status "user@${uid}.service" || true
+  die "The user systemd bus did not appear at $bus"
+}
+
+user_systemctl() {
+  local uid
+  uid="$(rootless_uid)"
+  runuser -u "$ROOTLESS_USER" -- env \
+    HOME="$ROOTLESS_HOME" \
+    USER="$ROOTLESS_USER" \
+    LOGNAME="$ROOTLESS_USER" \
+    XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    systemctl --user "$@"
+}
+
+user_journalctl() {
+  local uid
+  uid="$(rootless_uid)"
+  runuser -u "$ROOTLESS_USER" -- env \
+    HOME="$ROOTLESS_HOME" \
+    XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+    journalctl --user "$@"
+}
+
+rootless_docker() {
+  local uid cwd
+  uid="$(rootless_uid)"
+  cwd="${DOCKER_WORKDIR:-$PWD}"
+
+  [[ -d "$cwd" ]] || cwd="$ROOTLESS_HOME"
+
+  runuser -u "$ROOTLESS_USER" -- env \
+    HOME="$ROOTLESS_HOME" \
+    USER="$ROOTLESS_USER" \
+    LOGNAME="$ROOTLESS_USER" \
+    XDG_RUNTIME_DIR="/run/user/$uid" \
+    DOCKER_HOST="unix:///run/user/$uid/docker.sock" \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    bash --noprofile --norc -c '
+      workdir="$1"; shift
+      cd "$workdir" 2>/dev/null || cd "$HOME"
+      exec docker "$@"
+    ' bash "$cwd" "$@"
+}
+
+run_setup_tool() {
+  ensure_user_session
+
+  if [[ -s "$(service_file)" ]]; then
+    return 0
+  fi
+
+  command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1 || die "dockerd-rootless-setuptool.sh is missing."
+  command -v machinectl >/dev/null 2>&1 || die "machinectl is missing; install systemd-container."
+
+  log "Creating the rootless Docker user service"
+  machinectl shell "${ROOTLESS_USER}@" /bin/bash -lc \
+    'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; cd "$HOME"; dockerd-rootless-setuptool.sh install --force'
+
+  [[ -s "$(service_file)" ]] || die "Rootless setup did not create $(service_file)"
+}
+
+auto_downloads() {
+  local cpus
+  cpus="$(nproc 2>/dev/null || echo 2)"
+  if (( cpus <= 2 )); then echo 3
+  elif (( cpus <= 4 )); then echo 4
+  elif (( cpus <= 8 )); then echo 6
+  else echo 8
+  fi
+}
+
+auto_uploads() {
+  local cpus
+  cpus="$(nproc 2>/dev/null || echo 2)"
+  if (( cpus <= 2 )); then echo 5
+  elif (( cpus <= 4 )); then echo 6
+  else echo 8
+  fi
+}
+
+write_host_daemon_config() {
+  local downloads uploads cfg_dir backup=""
+  downloads="$MAX_CONCURRENT_DOWNLOADS"
+  uploads="$MAX_CONCURRENT_UPLOADS"
+  [[ "$downloads" == "auto" ]] && downloads="$(auto_downloads)"
+  [[ "$uploads" == "auto" ]] && uploads="$(auto_uploads)"
+  [[ "$downloads" =~ ^[1-9][0-9]*$ ]] || die "MAX_CONCURRENT_DOWNLOADS must be a positive integer or auto."
+  [[ "$uploads" =~ ^[1-9][0-9]*$ ]] || die "MAX_CONCURRENT_UPLOADS must be a positive integer or auto."
+
+  cfg_dir="$(dirname "$HOST_DAEMON_CONFIG")"
+  install -d -m 0755 "$cfg_dir"
+
+  if [[ -s "$HOST_DAEMON_CONFIG" ]]; then
+    backup="${HOST_DAEMON_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -a "$HOST_DAEMON_CONFIG" "$backup"
+  fi
+
+  python3 - "$HOST_DAEMON_CONFIG" "$downloads" "$uploads" <<'PYCFG'
+import json, os, sys, tempfile
+path, downloads, uploads = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+config = {}
+if os.path.exists(path) and os.path.getsize(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        try:
+            config = json.load(f)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"Invalid existing {path}: {e}")
+if not isinstance(config, dict):
+    raise SystemExit(f"Invalid existing {path}: top-level JSON must be an object")
+
+# Performance/availability defaults. Preserve unrelated existing daemon settings.
+config.update({
+    "userland-proxy": False,
+    "max-concurrent-downloads": downloads,
+    "max-concurrent-uploads": uploads,
+    "max-download-attempts": 5,
+    "shutdown-timeout": 30,
+    "live-restore": True,
+})
+
+# Prefer Docker's efficient local driver when the host uses the default/legacy
+# local-file logging path. Preserve an explicitly configured remote/custom
+# logging driver instead of silently breaking an existing logging pipeline.
+existing_log_driver = config.get("log-driver")
+if existing_log_driver in (None, "json-file", "local"):
+    config["log-driver"] = "local"
+    config["log-opts"] = {"max-size": "20m", "max-file": "5", "compress": "true"}
+
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(prefix='.daemon.json.', dir=directory, text=True)
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, sort_keys=True)
+        f.write('\n')
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PYCFG
+
+  if ! dockerd --validate --config-file "$HOST_DAEMON_CONFIG" >/dev/null; then
+    [[ -n "$backup" && -f "$backup" ]] && cp -a "$backup" "$HOST_DAEMON_CONFIG"
+    die "Host Docker daemon configuration validation failed. Previous config restored when available."
+  fi
+
+  if [[ -n "$backup" ]]; then
+    info "Host daemon config backup: $backup"
+  fi
+
+  # A fresh install legitimately has no prior daemon.json to back up.
+  # Always return success after a validated write so set -e/ERR does not
+  # treat an empty optional backup path as an installation failure.
+  return 0
+}
+
+host_has_running_containers() {
+  [[ -S "$HOST_DOCKER_SOCKET" ]] || return 1
+  host_docker ps -q 2>/dev/null | grep -q .
+}
+
+apply_host_optimization() {
+  write_host_daemon_config
+  systemctl daemon-reload
+  ensure_host_docker
+
+  if host_has_running_containers; then
+    # Never unexpectedly disrupt existing host workloads. A reload applies the
+    # reloadable settings; restart-only daemon settings take effect on the next
+    # explicit maintenance restart.
+    systemctl reload docker.service 2>/dev/null || true
+    warn "Host Docker has running containers; disruptive daemon restart skipped."
+    warn "Run 'sudo docker-manager host-restart' during a maintenance window to apply restart-only host settings."
+  else
+    systemctl restart docker.service
+    wait_for_host_daemon
+  fi
+}
+
+write_daemon_config() {
+  local cfg cfg_dir downloads uploads
+  cfg="$(daemon_config)"
+  cfg_dir="$(dirname "$cfg")"
+
+  downloads="$MAX_CONCURRENT_DOWNLOADS"
+  uploads="$MAX_CONCURRENT_UPLOADS"
+  [[ "$downloads" == "auto" ]] && downloads="$(auto_downloads)"
+  [[ "$uploads" == "auto" ]] && uploads="$(auto_uploads)"
+  [[ "$downloads" =~ ^[1-9][0-9]*$ ]] || die "MAX_CONCURRENT_DOWNLOADS must be a positive integer or auto."
+  [[ "$uploads" =~ ^[1-9][0-9]*$ ]] || die "MAX_CONCURRENT_UPLOADS must be a positive integer or auto."
+
+  install -d -o "$ROOTLESS_USER" -g "$ROOTLESS_USER" -m 0700 "$cfg_dir"
+
+  cat >"$cfg" <<EOF
+{
+  "userland-proxy": false,
+  "log-driver": "local",
+  "log-opts": {
+    "max-size": "20m",
+    "max-file": "5",
+    "compress": "true"
+  },
+  "max-concurrent-downloads": $downloads,
+  "max-concurrent-uploads": $uploads,
+  "max-download-attempts": 5,
+  "shutdown-timeout": 30
+}
+EOF
+
+  chown "$ROOTLESS_USER:$ROOTLESS_USER" "$cfg"
+  chmod 0600 "$cfg"
+
+  # Validate the managed daemon configuration before restart.
+  runuser -u "$ROOTLESS_USER" -- env HOME="$ROOTLESS_HOME" \
+    dockerd --validate --config-file "$cfg" >/dev/null
+}
+
+write_service_override() {
+  local override dir
+  override="$(override_file)"
+  dir="$(dirname "$override")"
+
+  install -d -o "$ROOTLESS_USER" -g "$ROOTLESS_USER" -m 0700 "$dir"
+  cat >"$override" <<'EOF'
+[Service]
+# Do not pin a legacy RootlessKit network backend. Current Docker Engine chooses
+# its optimized supported rootless network driver automatically.
+
+# Fast recovery without busy restart loops.
+Restart=always
+RestartSec=2s
+
+# Avoid low descriptor ceilings on proxy/database/web workloads.
+LimitNOFILE=1048576
+EOF
+
+  chown "$ROOTLESS_USER:$ROOTLESS_USER" "$override"
+  chmod 0644 "$override"
+}
+
+apply_optimization() {
+  ensure_rootless_user
+  ensure_local_storage
+  ensure_subids
+  ensure_user_namespaces
+  ensure_kernel_modules
+  ensure_user_session
+  run_setup_tool
+
+  write_daemon_config
+  write_service_override
+
+  user_systemctl daemon-reload
+  user_systemctl enable docker.service >/dev/null
+  user_systemctl restart docker.service
+}
+
+wait_for_daemon() {
+  local i
+  for i in $(seq 1 30); do
+    if [[ -S "$(docker_socket)" ]] && rootless_docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  logs_rootless || true
+  die "Rootless Docker did not become ready."
+}
+
+install_dual() {
+  require_root
+  require_ubuntu_2404
+  acquire_lock
+
+  log "Installing Docker in dual host + rootless mode"
+  configure_repo
+  remove_conflicts
+  install_packages
+  ensure_host_docker
+  ensure_rootless_user
+  ensure_subids
+  ensure_user_namespaces
+  ensure_kernel_modules
+  ensure_local_storage
+  apply_host_optimization
+  apply_optimization
+  wait_for_host_daemon
+  wait_for_daemon
+  self_install
+  verify_dual
+}
+
+update_dual() {
+  require_root
+  require_ubuntu_2404
+  acquire_lock
+  user_exists || die "Rootless Docker is not initialized. Run: $0 install"
+  refresh_identity
+
+  log "Updating host Docker, rootless Docker, Compose and Buildx"
+  configure_repo
+  remove_conflicts
+  apt_cmd install -y --only-upgrade "${DOCKER_PACKAGES[@]}" "${ROOTLESS_PREREQS[@]}" || \
+    apt_cmd install -y "${DOCKER_PACKAGES[@]}" "${ROOTLESS_PREREQS[@]}"
+
+  apply_host_optimization
+  apply_optimization
+  wait_for_host_daemon
+  wait_for_daemon
+  self_install
+  verify_dual
+}
+
+reinstall_dual() {
+  require_root
+  require_ubuntu_2404
+
+  if ! user_exists; then
+    install_dual
+    return
+  fi
+
+  acquire_lock
+  refresh_identity
+
+  log "Reinstalling Docker packages and both daemon configurations; data will be preserved"
+  info "Preserving host data: /var/lib/docker"
+  info "Preserving rootless data: $(data_dir)"
+
+  configure_repo
+  remove_conflicts
+  apt_cmd install -y --reinstall "${DOCKER_PACKAGES[@]}" "${ROOTLESS_PREREQS[@]}"
+  ensure_host_docker
+  ensure_subids
+  ensure_user_namespaces
+  ensure_user_session
+
+  user_systemctl disable --now docker.service 2>/dev/null || true
+  rm -f "$(service_file)"
+  rm -f "$ROOTLESS_HOME/.config/systemd/user/default.target.wants/docker.service"
+
+  run_setup_tool
+  apply_host_optimization
+  apply_optimization
+  wait_for_host_daemon
+  wait_for_daemon
+  self_install
+  verify_dual
+}
+
+optimize_dual() {
+  require_root
+  acquire_lock
+  user_exists || die "Rootless Docker is not initialized. Run: $0 install"
+  refresh_identity
+
+  log "Applying host + rootless Docker performance configuration"
+  apply_host_optimization
+  apply_optimization
+  wait_for_host_daemon
+  wait_for_daemon
+  verify_dual
+}
+
+start_rootless() {
+  require_root
+  user_exists || die "Rootless Docker is not initialized."
+  refresh_identity
+  ensure_user_session
+  user_systemctl start docker.service
+  wait_for_daemon
+  info "Rootless Docker started."
+}
+
+stop_rootless() {
+  require_root
+  user_exists || die "Rootless Docker is not initialized."
+  refresh_identity
+  ensure_user_session
+  user_systemctl stop docker.service
+  info "Rootless Docker stopped."
+}
+
+restart_rootless() {
+  require_root
+  user_exists || die "Rootless Docker is not initialized."
+  refresh_identity
+  ensure_user_session
+  user_systemctl restart docker.service
+  wait_for_daemon
+  info "Rootless Docker restarted."
+}
+
+start_host() {
+  require_root
+  ensure_host_docker
+  info "Host/rootful Docker started."
+}
+
+stop_host() {
+  require_root
+  systemctl stop docker.service docker.socket
+  info "Host/rootful Docker stopped."
+}
+
+restart_host() {
+  require_root
+  systemctl restart docker.service
+  wait_for_host_daemon
+  info "Host/rootful Docker restarted."
+}
+
+start_both() {
+  start_host
+  start_rootless
+}
+
+stop_both() {
+  stop_rootless
+  stop_host
+}
+
+restart_both() {
+  restart_host
+  restart_rootless
+}
+
+status_dual() {
+  require_root
+
+  printf '=== Docker Dual Manager ===
+'
+  printf 'Manager:          %s
+' "$MANAGER_PATH"
+  printf 'Host socket:      %s
+' "$HOST_DOCKER_SOCKET"
+  printf 'Host data:        %s
+' '/var/lib/docker'
+  printf 'Rootless account: %s
+' "$ROOTLESS_USER"
+  echo
+
+  echo "=== Host/rootful Docker ==="
+  printf 'docker.service: %s
+' "$(systemctl is-active docker.service 2>/dev/null || true)"
+  printf 'docker.socket:  %s
+' "$(systemctl is-active docker.socket 2>/dev/null || true)"
+  if [[ -S "$HOST_DOCKER_SOCKET" ]]; then
+    host_docker info --format 'Server={{.ServerVersion}} Storage={{.Driver}} Logging={{.LoggingDriver}} RootDir={{.DockerRootDir}} Security={{json .SecurityOptions}}' 2>/dev/null || true
+    host_docker ps --format 'table {{.Names}}	{{.Image}}	{{.Status}}	{{.Ports}}' 2>/dev/null || true
+  fi
+  echo
+
+  echo "=== Rootless Docker ==="
+  if ! user_exists; then
+    echo "Status: NOT INSTALLED"
+    return 0
+  fi
+  refresh_identity
+  local uid fstype
+  uid="$(rootless_uid)"
+  fstype="$(findmnt -n -o FSTYPE -T "$ROOTLESS_HOME" 2>/dev/null || echo unknown)"
+  printf 'UID:GID:          %s:%s
+' "$uid" "$(rootless_gid)"
+  printf 'Home:             %s
+' "$ROOTLESS_HOME"
+  printf 'Filesystem:       %s
+' "$fstype"
+  printf 'Runtime:          %s
+' "$(runtime_dir)"
+  printf 'Socket:           %s
+' "$(docker_socket)"
+  printf 'Data:             %s
+' "$(data_dir)"
+  ensure_user_session
+  printf 'user docker.service: %s
+' "$(user_systemctl is-active docker.service 2>/dev/null || true)"
+  if [[ -S "$(docker_socket)" ]]; then
+    rootless_docker info --format 'Server={{.ServerVersion}} Storage={{.Driver}} Logging={{.LoggingDriver}} Cgroup={{.CgroupDriver}} RootDir={{.DockerRootDir}} Security={{json .SecurityOptions}}' 2>/dev/null || true
+    rootless_docker ps --format 'table {{.Names}}	{{.Image}}	{{.Status}}	{{.Ports}}' 2>/dev/null || true
+  fi
+}
+
+verify_dual() {
+  require_root
+  user_exists || die "Rootless Docker is not initialized."
+  refresh_identity
+  ensure_host_docker
+  ensure_user_session
+  wait_for_host_daemon
+  wait_for_daemon
+
+  log "Verifying host/rootful Docker"
+  local host_info rootless_info tmp
+  host_info="$(host_docker info --format 'Server={{.ServerVersion}} Security={{json .SecurityOptions}} Storage={{.Driver}} Logging={{.LoggingDriver}} RootDir={{.DockerRootDir}}')"
+  echo "$host_info"
+  grep -qi 'rootless' <<<"$host_info" && die "Host socket unexpectedly reports rootless mode."
+  [[ "$(host_docker info --format '{{.DockerRootDir}}')" != "$(data_dir)" ]] || die "Host and rootless Docker data roots must be different."
+
+  log "Verifying rootless Docker"
+  rootless_info="$(rootless_docker info --format 'Server={{.ServerVersion}} Security={{json .SecurityOptions}} Storage={{.Driver}} Logging={{.LoggingDriver}} Cgroup={{.CgroupDriver}} RootDir={{.DockerRootDir}}')"
+  echo "$rootless_info"
+  grep -qi 'rootless' <<<"$rootless_info" || die "Rootless socket does not report rootless mode."
+
+  host_docker compose version >/dev/null || die "Host Docker Compose plugin is unavailable."
+  host_docker buildx version >/dev/null || die "Host Docker Buildx plugin is unavailable."
+  rootless_docker compose version >/dev/null || die "Rootless Docker Compose plugin is unavailable."
+  rootless_docker buildx version >/dev/null || die "Rootless Docker Buildx plugin is unavailable."
+
+  log "Running hello-world on host Docker"
+  tmp="$(mktemp)"
+  host_docker run --rm hello-world >"$tmp"
+  grep -q 'Hello from Docker!' "$tmp" || { cat "$tmp"; rm -f "$tmp"; die "Host hello-world verification failed."; }
+  rm -f "$tmp"
+
+  log "Running hello-world on rootless Docker"
+  tmp="$(mktemp)"
+  rootless_docker run --rm hello-world >"$tmp"
+  grep -q 'Hello from Docker!' "$tmp" || { cat "$tmp"; rm -f "$tmp"; die "Rootless hello-world verification failed."; }
+  rm -f "$tmp"
+
+  echo
+  echo "DUAL DOCKER: VERIFIED"
+  echo "HOST:     unix://${HOST_DOCKER_SOCKET}"
+  echo "ROOTLESS: $(docker_host)"
+  warn "The two daemons are independent. Do not publish the same host port from both daemons."
+}
+
+doctor_dual() {
+  require_root
+  require_ubuntu_2404
+
+  echo "=== Host ==="
+  uname -srmo
+  printf 'CPU threads: %s\n' "$(nproc)"
+  free -h || true
+  df -hT "$ROOTLESS_HOME" 2>/dev/null || df -hT / || true
+  echo
+
+  echo "=== Kernel / namespaces ==="
+  printf 'cgroup fs: %s\n' "$(stat -fc %T /sys/fs/cgroup 2>/dev/null || echo unknown)"
+  [[ -r /proc/sys/kernel/unprivileged_userns_clone ]] && \
+    printf 'kernel.unprivileged_userns_clone=%s\n' "$(cat /proc/sys/kernel/unprivileged_userns_clone)"
+  [[ -r /proc/sys/user/max_user_namespaces ]] && \
+    printf 'user.max_user_namespaces=%s\n' "$(cat /proc/sys/user/max_user_namespaces)"
+  echo
+
+  echo "=== Packages ==="
+  local pkg
+  for pkg in "${DOCKER_PACKAGES[@]}" "${ROOTLESS_PREREQS[@]}"; do
+    printf '%-30s %s\n' "$pkg" "$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo missing)"
+  done
+  echo
+
+  if user_exists; then
+    refresh_identity
+    echo "=== Rootless account ==="
+    id "$ROOTLESS_USER"
+    grep "^${ROOTLESS_USER}:" /etc/subuid 2>/dev/null || true
+    grep "^${ROOTLESS_USER}:" /etc/subgid 2>/dev/null || true
+    loginctl show-user "$ROOTLESS_USER" -p Linger -p State 2>/dev/null || true
+    printf 'data filesystem: %s\n' "$(findmnt -n -o FSTYPE -T "$ROOTLESS_HOME" 2>/dev/null || echo unknown)"
+    echo
+  fi
+
+  echo "=== Host/rootful Docker ==="
+  printf 'docker.service: %s\n' "$(systemctl is-active docker.service 2>/dev/null || true)"
+  printf 'docker.socket:  %s\n' "$(systemctl is-active docker.socket 2>/dev/null || true)"
+  echo
+
+  if user_exists && [[ -S "$(docker_socket)" ]]; then
+    echo "=== Rootless Docker ==="
+    rootless_docker info --format '{{json .}}' 2>/dev/null | \
+      python3 -c 'import json,sys; d=json.load(sys.stdin); print("Server:",d.get("ServerVersion")); print("Storage:",d.get("Driver")); print("Logging:",d.get("LoggingDriver")); print("Cgroup:",d.get("CgroupDriver")); print("RootDir:",d.get("DockerRootDir")); print("Security:", ", ".join(d.get("SecurityOptions",[])))' \
+      2>/dev/null || rootless_docker info || true
+    echo
+    echo "Service override:"
+    cat "$(override_file)" 2>/dev/null || true
+    echo
+    echo "Daemon config:"
+    cat "$(daemon_config)" 2>/dev/null || true
+  fi
+}
+
+logs_rootless() {
+  require_root
+  user_exists || die "Rootless Docker is not initialized."
+  refresh_identity
+  ensure_user_session
+  user_journalctl -u docker.service -n "$LOG_LINES" --no-pager
+}
+
+show_env() {
+  require_root
+  user_exists || die "Rootless Docker is not initialized."
+  refresh_identity
+  echo "HOST_DOCKER_HOST=unix://${HOST_DOCKER_SOCKET}"
+  echo "ROOTLESS_DOCKER_HOST=$(docker_host)"
+  echo
+  echo "Explicit manager commands:"
+  echo "  sudo docker-manager host ps"
+  echo "  sudo docker-manager rootless ps"
+  echo "  sudo docker-manager host-compose up -d"
+  echo "  sudo docker-manager rootless-compose up -d"
+  echo
+  echo "Direct CLI examples:"
+  echo "  docker --host unix://${HOST_DOCKER_SOCKET} ps"
+  echo "  sudo -u $ROOTLESS_USER env XDG_RUNTIME_DIR=$(runtime_dir) DOCKER_HOST=$(docker_host) docker ps"
+}
+
+remove_rootless() {
+  require_root
+  acquire_lock
+
+  user_exists || {
+    info "Rootless account does not exist; nothing to remove."
+    return 0
+  }
+  refresh_identity
+
+  log "Removing the rootless Docker user service; data is preserved"
+  info "Preserving: $(data_dir)"
+  ensure_user_session
+
+  if command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
+    machinectl shell "${ROOTLESS_USER}@" /bin/bash -lc \
+      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; dockerd-rootless-setuptool.sh uninstall || true'
+  else
+    user_systemctl disable --now docker.service 2>/dev/null || true
+  fi
+
+  rm -f "$(service_file)" "$(override_file)"
+  info "Rootless service removed; Docker data and packages were preserved."
+}
+
+purge_rootless() {
+  require_root
+  acquire_lock
+
+  user_exists || {
+    info "Rootless account does not exist; nothing to purge."
+    return 0
+  }
+  refresh_identity
+
+  cat <<EOF
+
+DESTRUCTIVE OPERATION
+This permanently deletes the managed rootless Docker data at:
+  $(data_dir)
+
+It removes containers, images, volumes, networks and build cache belonging to
+'$ROOTLESS_USER'. Rootful Docker data under /var/lib/docker is NOT touched.
+EOF
+
+  local confirmation=""
+  read -r -p "Type DELETE-ROOTLESS-DATA to continue: " confirmation
+  [[ "$confirmation" == "DELETE-ROOTLESS-DATA" ]] || die "Purge cancelled."
+
+  ensure_user_session
+  user_systemctl disable --now docker.service 2>/dev/null || true
+
+  if command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
+    machinectl shell "${ROOTLESS_USER}@" /bin/bash -lc \
+      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; dockerd-rootless-setuptool.sh uninstall || true'
+  fi
+
+  if command -v rootlesskit >/dev/null 2>&1; then
+    runuser -u "$ROOTLESS_USER" -- env HOME="$ROOTLESS_HOME" \
+      rootlesskit rm -rf "$(data_dir)" || rm -rf "$(data_dir)"
+  else
+    rm -rf "$(data_dir)"
+  fi
+
+  rm -rf "$ROOTLESS_HOME/.config/docker" "$ROOTLESS_HOME/.config/systemd/user/docker.service.d"
+  rm -f "$(service_file)" "$ROOTLESS_HOME/.config/systemd/user/default.target.wants/docker.service"
+
+  info "Rootless Docker data was permanently deleted."
+  info "The Linux account and Docker packages were preserved for safe reinstall."
+}
+
+show_repo() {
+  echo "=== Docker APT source ==="
+  cat "$DOCKER_SOURCES" 2>/dev/null || echo "$DOCKER_SOURCES is not configured."
+  echo
+  echo "=== Package policy ==="
+  apt-cache policy "${DOCKER_PACKAGES[@]}" 2>/dev/null || true
+}
+
+show_manager_version() {
+  echo "docker-manager $MANAGER_VERSION"
+  command -v docker >/dev/null 2>&1 && docker --version 2>/dev/null || true
+}
+
+help_text() {
+  cat <<EOF
+Docker Dual Manager v$MANAGER_VERSION - Host + Rootless - Ubuntu 24.04 LTS
+
+Usage:
+  sudo docker-manager <command> [arguments]
+
+Lifecycle:
+  install           Install/configure BOTH host and rootless Docker
+  update            Update Docker/Compose/Buildx and tune BOTH daemons
+  reinstall         Reinstall packages/services while preserving BOTH data stores
+  optimize          Re-apply performance tuning to BOTH daemons
+  start             Start BOTH daemons
+  stop              Stop BOTH daemons
+  restart           Restart BOTH daemons
+  host-start        Start only host/rootful Docker
+  host-stop         Stop only host/rootful Docker
+  host-restart      Restart only host/rootful Docker
+  rootless-start    Start only rootless Docker
+  rootless-stop     Stop only rootless Docker
+  rootless-restart  Restart only rootless Docker
+
+Operations:
+  version            Show manager and Docker Engine version
+  status             Show both daemon states and containers
+  verify             Verify both daemons, Compose, Buildx and hello-world
+  doctor             Host/kernel/package/storage/daemon diagnostics
+  logs               Show rootless user-service logs
+  host-logs          Show host docker.service logs
+  env                Show both explicit socket endpoints
+  host ...           Run Docker CLI against HOST/rootful daemon
+  rootless ...       Run Docker CLI against ROOTLESS daemon
+  host-compose ...   Run Docker Compose against HOST/rootful daemon
+  rootless-compose ... Run Docker Compose against ROOTLESS daemon
+
+Compatibility aliases:
+  docker ...         Same as rootless ...
+  compose ...        Same as rootless-compose ...
+
+Removal:
+  remove             Remove only rootless service; HOST Docker is untouched
+  purge              Delete only rootless Docker data; HOST Docker/data untouched
+
+Defaults:
+  HOST socket=$HOST_DOCKER_SOCKET
+  HOST data=/var/lib/docker
+  ROOTLESS_USER=$ROOTLESS_USER
+  ROOTLESS_HOME=$ROOTLESS_HOME
+  ROOTLESS socket=unix:///run/user/<UID>/docker.sock
+
+Performance defaults:
+  - Both daemons use Docker's local rotating/compressed log driver
+  - Both daemons use auto-sized pull/push concurrency
+  - Host Docker uses live-restore for standalone-container availability
+  - Rootless network backend: Docker Engine current optimized default
+  - Docker Engine 29.5+ can use its newer preferred rootless network backend
+  - Docker userland proxy: disabled
+  - Storage backend: selected by current Docker Engine/kernel
+  - Rootless account is NOT a member of the privileged docker group
+
+Environment overrides:
+  ROOTLESS_USER=docker-rootless
+  ROOTLESS_HOME=/var/lib/docker-rootless
+  MAX_CONCURRENT_DOWNLOADS=8
+  MAX_CONCURRENT_UPLOADS=8
+  APT_LOCK_TIMEOUT=1200
+  LOG_LINES=500
+
+Important:
+  - HOST and ROOTLESS are intentionally independent Docker daemons.
+  - Images, containers, volumes and networks are NOT shared.
+  - The same host TCP/UDP port cannot be published by workloads in both daemons.
+  - Use explicit 'host' and 'rootless' commands to prevent accidental targeting.
+  - Rootless Docker runs as a user systemd service and starts at boot via linger.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    install)        install_dual "$@" ;;
+    update)         update_dual "$@" ;;
+    reinstall)      reinstall_dual "$@" ;;
+    optimize|tune)  optimize_dual "$@" ;;
+    start)          start_both "$@" ;;
+    stop)           stop_both "$@" ;;
+    restart)        restart_both "$@" ;;
+    host-start)     start_host "$@" ;;
+    host-stop)      stop_host "$@" ;;
+    host-restart)   restart_host "$@" ;;
+    rootless-start)   start_rootless "$@" ;;
+    rootless-stop)    stop_rootless "$@" ;;
+    rootless-restart) restart_rootless "$@" ;;
+    status)         status_dual "$@" ;;
+    verify)         verify_dual "$@" ;;
+    doctor)         doctor_dual "$@" ;;
+    logs|rootless-logs) logs_rootless "$@" ;;
+    host-logs)      require_root; journalctl -u docker.service -n "$LOG_LINES" --no-pager "$@" ;;
+    env)            show_env "$@" ;;
+    host)           require_root; host_docker "$@" ;;
+    rootless|docker) require_root; user_exists || die "Run install first."; refresh_identity; ensure_user_session; rootless_docker "$@" ;;
+    host-compose)   require_root; host_docker compose "$@" ;;
+    rootless-compose|compose) require_root; user_exists || die "Run install first."; refresh_identity; ensure_user_session; rootless_docker compose "$@" ;;
+    remove|delete|uninstall) remove_rootless "$@" ;;
+    purge)          purge_rootless "$@" ;;
+    repo)           show_repo "$@" ;;
+    version|manager-version) show_manager_version ;;
+    help|-h|--help) help_text ;;
+    *)
+      help_text
+      echo
+      die "Unknown command: $cmd"
+      ;;
+  esac
+}
+
+main "$@"

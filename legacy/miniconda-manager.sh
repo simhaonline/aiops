@@ -1,0 +1,1589 @@
+#!/usr/bin/env bash
+# LEGACY SUPPORT SNAPSHOT
+# Suite archive: pre-1.0.1 internal manager lineage
+# This file is NOT installed on PATH and is preserved for rollback/reference only.
+readonly AIOPS_LEGACY_RELEASE="1.0.1"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+# =============================================================================
+# Miniconda Manager
+# Revision: 2.3.0
+# Target: Ubuntu 24.04 LTS
+#
+# Root-owned, system-wide Miniconda manager with no dedicated Linux-user
+# dependency and no per-user Conda ownership model.
+#
+# Managed components:
+#   /opt/miniconda3                  Miniconda prefix (root:root)
+#   /opt/miniconda3/.condarc        Manager-owned Conda policy
+#   /etc/profile.d/miniconda.sh     System shell hook; base stays inactive
+#   /usr/local/bin/conda             Safe symlink to managed Conda
+#   /usr/local/bin/conda-env         Safe symlink to managed conda-env
+#   /usr/local/bin/miniconda-manager Installed manager
+#
+# No system Python/Pip symlinks are created.
+# =============================================================================
+
+readonly MANAGER_VERSION="2.3.0"
+readonly MANAGER_PATH="/usr/local/bin/miniconda-manager"
+
+CONDA_PREFIX="${CONDA_PREFIX:-/opt/miniconda3}"
+readonly CONDA_PREFIX
+readonly CONDA_BIN="$CONDA_PREFIX/bin/conda"
+readonly CONDA_PYTHON="$CONDA_PREFIX/bin/python"
+readonly CONDARC_FILE="$CONDA_PREFIX/.condarc"
+readonly CHANNEL_POLICY_FILE="/etc/miniconda-manager.channels"
+
+readonly SHELL_PROFILE="/etc/profile.d/miniconda.sh"
+readonly BASH_BASHRC="/etc/bash.bashrc"
+readonly BASH_BEGIN="# >>> MINICONDA MANAGER SYSTEM BASH HOOK >>>"
+readonly BASH_END="# <<< MINICONDA MANAGER SYSTEM BASH HOOK <<<"
+readonly SYSTEM_CONDA_LINK="/usr/local/bin/conda"
+readonly SYSTEM_CONDA_ENV_LINK="/usr/local/bin/conda-env"
+
+readonly LEGACY_PROFILE_BEGIN="# >>> SIMHA MINICONDA MANAGED BLOCK >>>"
+readonly LEGACY_PROFILE_END="# <<< SIMHA MINICONDA MANAGED BLOCK <<<"
+
+readonly LOCK_FILE="/run/lock/miniconda-manager.lock"
+LOCK_TIMEOUT="${LOCK_TIMEOUT:-120}"
+APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-600}"
+
+# The manager owns CONDARC, so it must also provide at least one package channel.
+#
+# Production default: conda-forge ONLY.
+#
+# We intentionally do not select Anaconda's "defaults" channel automatically:
+# current Miniconda includes the conda-anaconda-tos plugin and use of Anaconda's
+# default repositories requires explicit Terms-of-Service acceptance. A lifecycle
+# manager must never silently accept legal terms on an operator's behalf.
+#
+# Conda's current channel guidance also recommends one global default channel
+# (either defaults OR conda-forge) instead of globally mixing both ecosystems.
+#
+# Operators who intentionally use Anaconda defaults can switch explicitly with:
+#   miniconda-manager use-anaconda-defaults
+# and then review/accept the applicable ToS themselves.
+CONDA_CHANNELS="${CONDA_CHANNELS:-conda-forge}"
+readonly CONDA_CHANNELS
+
+# Optional reproducibility/security pin. When empty, the SHA-256 is read from
+# the official Miniconda index over HTTPS and compared with the download.
+MINICONDA_SHA256="${MINICONDA_SHA256:-}"
+
+log()  { printf '\n==> %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+
+require_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run this command as root: sudo $0 ${1:-status}"
+}
+
+require_ubuntu_2404() {
+  [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."
+
+  # shellcheck disable=SC1091
+  source /etc/os-release
+
+  [[ "${ID:-}" == "ubuntu" ]] || die "This manager supports Ubuntu only."
+  [[ "${VERSION_ID:-}" == "24.04" ]] || \
+    die "This manager is validated for Ubuntu 24.04 LTS. Found: ${PRETTY_NAME:-unknown}"
+}
+
+validate_prefix() {
+  [[ "$CONDA_PREFIX" == /* ]] || die "CONDA_PREFIX must be an absolute path."
+  [[ "$CONDA_PREFIX" != *[$' \t\n\r']* ]] || \
+    die "CONDA_PREFIX must not contain whitespace."
+
+  local canonical base
+  canonical="$(readlink -m -- "$CONDA_PREFIX")"
+  [[ "$canonical" == "$CONDA_PREFIX" ]] || \
+    die "CONDA_PREFIX must be canonical (no symlinked parents, '.', '..', duplicate or trailing slashes): $CONDA_PREFIX"
+
+  case "$canonical" in
+    /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+      die "Refusing unsafe CONDA_PREFIX: $canonical"
+      ;;
+  esac
+
+  if [[ -L "$canonical" ]]; then
+    die "Refusing a symlinked CONDA_PREFIX: $canonical"
+  fi
+
+  base="$(basename -- "$canonical")"
+  [[ -n "$base" && "$base" != "." && "$base" != ".." ]] || die "Invalid CONDA_PREFIX."
+}
+
+acquire_lock() {
+  require_root
+  install -d -m 0755 /run/lock
+  exec 9>"$LOCK_FILE"
+  flock -w "$LOCK_TIMEOUT" 9 || \
+    die "Another miniconda-manager operation is active (lock timeout: ${LOCK_TIMEOUT}s)."
+}
+
+apt_cmd() {
+  DEBIAN_FRONTEND=noninteractive \
+    apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT}" "$@"
+}
+
+install_dependencies() {
+  require_root
+  require_ubuntu_2404
+
+  local packages=(ca-certificates curl bzip2 xz-utils python3 util-linux)
+  local missing=()
+  local pkg
+
+  for pkg in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
+      missing+=("$pkg")
+    fi
+  done
+
+  if ((${#missing[@]} == 0)); then
+    info "Required OS packages are already installed; skipping apt update."
+    return 0
+  fi
+
+  log "Installing required OS packages"
+  info "Missing: ${missing[*]}"
+  apt_cmd update
+  apt_cmd install -y --no-install-recommends "${missing[@]}"
+}
+
+installer_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'x86_64' ;;
+    aarch64|arm64) printf 'aarch64' ;;
+    *) die "Unsupported Miniconda architecture: $(uname -m)" ;;
+  esac
+}
+
+installer_filename() {
+  printf 'Miniconda3-latest-Linux-%s.sh' "$(installer_arch)"
+}
+
+installer_url() {
+  printf 'https://repo.anaconda.com/miniconda/%s' "$(installer_filename)"
+}
+
+fetch_official_sha256() {
+  local filename="$1"
+  local index_file="$2"
+
+  if [[ -n "$MINICONDA_SHA256" ]]; then
+    [[ "$MINICONDA_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || \
+      die "MINICONDA_SHA256 must contain exactly 64 hexadecimal characters."
+    printf '%s\n' "${MINICONDA_SHA256,,}"
+    return 0
+  fi
+
+  curl \
+    --fail --show-error --silent --location \
+    --proto '=https' --tlsv1.2 \
+    --retry 4 --retry-delay 2 --retry-all-errors \
+    --connect-timeout 15 --max-time 60 \
+    'https://repo.anaconda.com/miniconda/' \
+    -o "$index_file"
+
+  python3 - "$index_file" "$filename" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+index = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+filename = sys.argv[2]
+
+# Prefer the exact HTML table row containing the installer.
+row = re.search(
+    r"<tr[^>]*>.*?href=[\"'][^\"']*" + re.escape(filename) + r"[\"'].*?</tr>",
+    index,
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+if row:
+    hashes = re.findall(r"\b[0-9a-fA-F]{64}\b", row.group(0))
+    if hashes:
+        print(hashes[-1].lower())
+        raise SystemExit(0)
+
+# Defensive fallback for a changed index layout: inspect a bounded region
+# immediately following the exact filename.
+pos = index.find(filename)
+if pos >= 0:
+    region = index[pos : pos + 4096]
+    match = re.search(r"\b[0-9a-fA-F]{64}\b", region)
+    if match:
+        print(match.group(0).lower())
+        raise SystemExit(0)
+
+raise SystemExit(f"Unable to find the official SHA-256 for {filename}")
+PY
+}
+
+download_installer() {
+  local destination="$1"
+  local workdir="$2"
+  local filename url expected actual index_file
+
+  filename="$(installer_filename)"
+  url="$(installer_url)"
+  index_file="$workdir/miniconda-index.html"
+
+  log "Downloading official Miniconda installer"
+  info "$url"
+
+  curl \
+    --fail --show-error --location \
+    --proto '=https' --tlsv1.2 \
+    --retry 4 --retry-delay 2 --retry-all-errors \
+    --connect-timeout 15 \
+    "$url" \
+    -o "$destination"
+
+  [[ -s "$destination" ]] || die "Downloaded installer is empty."
+
+  expected="$(fetch_official_sha256 "$filename" "$index_file")" || \
+    die "Unable to retrieve the official Miniconda SHA-256."
+  actual="$(sha256sum "$destination" | awk '{print tolower($1)}')"
+
+  [[ "$actual" == "$expected" ]] || {
+    rm -f -- "$destination"
+    die "Miniconda installer SHA-256 mismatch. Expected $expected, got $actual."
+  }
+
+  chmod 0700 "$destination"
+  info "Installer SHA-256 verified: $actual"
+}
+
+conda_exec() {
+  [[ -x "$CONDA_BIN" ]] || die "Conda is not installed at $CONDA_BIN."
+
+  env \
+    -u PYTHONPATH \
+    -u PYTHONHOME \
+    -u CONDA_PREFIX \
+    -u CONDA_DEFAULT_ENV \
+    -u CONDA_PROMPT_MODIFIER \
+    -u CONDA_SHLVL \
+    -u _CE_CONDA \
+    -u _CE_M \
+    HOME=/root \
+    USER=root \
+    LOGNAME=root \
+    CONDARC="$CONDARC_FILE" \
+    PATH="$CONDA_PREFIX/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    "$CONDA_BIN" "$@"
+}
+
+python_exec() {
+  [[ -x "$CONDA_PYTHON" ]] || die "Miniconda Python is not installed at $CONDA_PYTHON."
+
+  env \
+    -u PYTHONPATH \
+    -u PYTHONHOME \
+    HOME=/root \
+    USER=root \
+    LOGNAME=root \
+    PATH="$CONDA_PREFIX/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    "$CONDA_PYTHON" "$@"
+}
+
+cleanup_legacy_user_profiles() {
+  require_root
+
+  python3 - "$LEGACY_PROFILE_BEGIN" "$LEGACY_PROFILE_END" <<'PY'
+from pathlib import Path
+import os
+import stat
+import sys
+
+begin, end = sys.argv[1], sys.argv[2]
+paths = [Path("/root/.bashrc")]
+home = Path("/home")
+if home.is_dir():
+    paths.extend(home.glob("*/.bashrc"))
+
+changed = []
+for path in paths:
+    try:
+        st = path.stat()
+        text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    except (FileNotFoundError, PermissionError, OSError):
+        continue
+
+    lines = text.splitlines()
+    output = []
+    inside = False
+    found = False
+
+    for line in lines:
+        if line == begin:
+            inside = True
+            found = True
+            continue
+        if inside and line == end:
+            inside = False
+            continue
+        if not inside:
+            output.append(line)
+
+    # Do not rewrite an unterminated legacy block automatically.
+    if inside:
+        continue
+    if not found:
+        continue
+
+    result = "\n".join(output).rstrip()
+    if result:
+        result += "\n"
+
+    tmp = path.with_name(path.name + ".miniconda-manager.tmp")
+    tmp.write_text(result, encoding="utf-8", errors="surrogateescape")
+    os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.replace(tmp, path)
+    changed.append(str(path))
+
+for item in changed:
+    print(item)
+PY
+}
+
+legacy_profile_count() {
+  local count=0 file
+  local candidates=(/root/.bashrc)
+
+  if [[ -d /home ]]; then
+    while IFS= read -r -d '' file; do
+      candidates+=("$file")
+    done < <(find /home -mindepth 2 -maxdepth 2 -type f -name .bashrc -print0 2>/dev/null)
+  fi
+
+  for file in "${candidates[@]}"; do
+    [[ -f "$file" ]] || continue
+    if grep -Fq "$LEGACY_PROFILE_BEGIN" "$file" 2>/dev/null; then
+      ((count += 1))
+    fi
+  done
+
+  printf '%d\n' "$count"
+}
+
+conda_auto_activate_key() {
+  # Conda 26.3+ uses auto_activate as the canonical setting. Older Conda
+  # releases use auto_activate_base. Detect the supported key instead of
+  # hard-coding a version check so repair/update remain backward compatible.
+  if conda_exec config --describe auto_activate >/dev/null 2>&1; then
+    printf '%s\n' 'auto_activate'
+  else
+    printf '%s\n' 'auto_activate_base'
+  fi
+}
+
+validate_channel_token() {
+  local channel="$1"
+  [[ -n "$channel" ]] || return 1
+  [[ "$channel" != *[$'\n\r\t ']* ]] || return 1
+  [[ "$channel" != *[\{\}\[\]\;]* ]] || return 1
+
+  # Accept normal Conda channel names (defaults, conda-forge, org/name) and
+  # explicit HTTPS channel URLs. Credentials embedded in URLs are rejected.
+  if [[ "$channel" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    return 0
+  fi
+  if [[ "$channel" =~ ^https://[^/@[:space:]]+(/[^[:space:]]*)?$ ]]; then
+    return 0
+  fi
+  return 1
+}
+
+configured_channels() {
+  local token
+
+  if [[ -f "$CHANNEL_POLICY_FILE" ]]; then
+    while IFS= read -r token; do
+      token="${token%%#*}"
+      token="${token//[[:space:]]/}"
+      [[ -n "$token" ]] || continue
+      validate_channel_token "$token" || die "Invalid Conda channel in $CHANNEL_POLICY_FILE: $token"
+      printf '%s\n' "$token"
+    done <"$CHANNEL_POLICY_FILE"
+    return 0
+  fi
+
+  local raw="$CONDA_CHANNELS"
+  local -a channels=()
+  IFS=',' read -r -a channels <<<"$raw"
+  ((${#channels[@]} > 0)) || die "CONDA_CHANNELS must contain at least one channel."
+
+  for token in "${channels[@]}"; do
+    [[ -n "$token" ]] || die "CONDA_CHANNELS contains an empty channel entry."
+    validate_channel_token "$token" || die "Invalid Conda channel in CONDA_CHANNELS: $token"
+    printf '%s\n' "$token"
+  done
+}
+
+write_condarc() {
+  require_root
+  [[ -d "$CONDA_PREFIX" ]] || die "Miniconda prefix is missing: $CONDA_PREFIX"
+
+  local tmp activation_key
+  local -a channels=()
+  activation_key="$(conda_auto_activate_key)"
+  mapfile -t channels < <(configured_channels)
+  ((${#channels[@]} > 0)) || die "No Conda channels are configured."
+  tmp="$(mktemp "${CONDA_PREFIX}/.condarc.tmp.XXXXXX")"
+
+  cat >"$tmp" <<EOF_CONDARC
+# Managed by miniconda-manager.
+# Keep the base environment inactive unless explicitly requested.
+${activation_key}: false
+
+# Updates are explicit through miniconda-manager update.
+auto_update_conda: false
+
+# Package sources. The managed CONDARC must never leave this list empty.
+channels:
+EOF_CONDARC
+
+  local channel
+  for channel in "${channels[@]}"; do
+    printf '  - %s\n' "$channel" >>"$tmp"
+  done
+
+  cat >>"$tmp" <<EOF_CONDARC
+
+# Fast dependency solving and deterministic channel precedence.
+solver: libmamba
+channel_priority: strict
+
+# Security and diagnostics.
+ssl_verify: true
+safety_checks: enabled
+show_channel_urls: true
+EOF_CONDARC
+
+  chown root:root "$tmp"
+  chmod 0644 "$tmp"
+  mv -f -- "$tmp" "$CONDARC_FILE"
+
+  # Parse the managed file immediately so syntax/configuration failures are
+  # caught during install/repair instead of at first production use.
+  conda_exec config --show \
+    "$activation_key" auto_update_conda channels solver channel_priority ssl_verify safety_checks \
+    >/dev/null
+}
+
+write_shell_profile() {
+  require_root
+
+  local tmp
+  tmp="$(mktemp /etc/profile.d/.miniconda.sh.XXXXXX)"
+
+  cat >"$tmp" <<EOF_PROFILE
+# Managed by miniconda-manager. Do not edit this file directly.
+# Shell integration only; the base environment is intentionally not activated.
+export CONDARC="$CONDARC_FILE"
+if [ -r "$CONDA_PREFIX/etc/profile.d/conda.sh" ]; then
+    . "$CONDA_PREFIX/etc/profile.d/conda.sh"
+fi
+EOF_PROFILE
+
+  install -o root -g root -m 0644 "$tmp" "$SHELL_PROFILE"
+  rm -f -- "$tmp"
+}
+
+write_bash_bashrc_hook() {
+  require_root
+  [[ -f "$BASH_BASHRC" ]] || die "Missing system Bash rc: $BASH_BASHRC"
+
+  python3 - "$BASH_BASHRC" "$BASH_BEGIN" "$BASH_END" "$SHELL_PROFILE" <<'PY2'
+from pathlib import Path
+import os, stat, sys
+path=Path(sys.argv[1]); begin,end,profile=sys.argv[2:]
+st=path.stat(); text=path.read_text(encoding='utf-8',errors='surrogateescape')
+out=[]; inside=False
+for line in text.splitlines():
+    if line==begin: inside=True; continue
+    if inside and line==end: inside=False; continue
+    if not inside: out.append(line)
+if inside: raise SystemExit('Unterminated miniconda-manager Bash block; refusing rewrite')
+block=[begin,"# Managed by miniconda-manager. Enables 'conda activate' in interactive non-login Bash.",f'if [ -r "{profile}" ]; then',f'    . "{profile}"','fi',end]
+result='\n'.join(out).rstrip()+'\n\n'+'\n'.join(block)+'\n'
+tmp=path.with_name(path.name+'.miniconda-manager.tmp'); tmp.write_text(result,encoding='utf-8',errors='surrogateescape')
+os.chmod(tmp,stat.S_IMODE(st.st_mode)); os.chown(tmp,st.st_uid,st.st_gid); os.replace(tmp,path)
+PY2
+}
+
+remove_bash_bashrc_hook() {
+  require_root
+  [[ -f "$BASH_BASHRC" ]] || return 0
+  python3 - "$BASH_BASHRC" "$BASH_BEGIN" "$BASH_END" <<'PY2'
+from pathlib import Path
+import os, stat, sys
+path=Path(sys.argv[1]); begin,end=sys.argv[2:]
+st=path.stat(); text=path.read_text(encoding='utf-8',errors='surrogateescape')
+out=[]; inside=False; found=False
+for line in text.splitlines():
+    if line==begin: inside=True; found=True; continue
+    if inside and line==end: inside=False; continue
+    if not inside: out.append(line)
+if inside: raise SystemExit('Unterminated miniconda-manager Bash block; refusing rewrite')
+if not found: raise SystemExit(0)
+result='\n'.join(out).rstrip()+'\n'
+tmp=path.with_name(path.name+'.miniconda-manager.tmp'); tmp.write_text(result,encoding='utf-8',errors='surrogateescape')
+os.chmod(tmp,stat.S_IMODE(st.st_mode)); os.chown(tmp,st.st_uid,st.st_gid); os.replace(tmp,path)
+PY2
+}
+
+remove_shell_profile() {
+  require_root
+
+  [[ -e "$SHELL_PROFILE" ]] || return 0
+
+  if grep -Fq 'Managed by miniconda-manager.' "$SHELL_PROFILE" 2>/dev/null; then
+    rm -f -- "$SHELL_PROFILE"
+  else
+    die "Refusing to delete unmanaged file: $SHELL_PROFILE"
+  fi
+}
+
+safe_symlink() {
+  local target="$1" link="$2"
+
+  [[ -e "$target" ]] || return 0
+
+  if [[ ! -e "$link" && ! -L "$link" ]]; then
+    ln -s "$target" "$link"
+    return 0
+  fi
+
+  if [[ -L "$link" && "$(readlink -f "$link" 2>/dev/null || true)" == "$(readlink -f "$target")" ]]; then
+    return 0
+  fi
+
+  warn "Not replacing existing unmanaged path: $link"
+}
+
+install_system_links() {
+  require_root
+  safe_symlink "$CONDA_BIN" "$SYSTEM_CONDA_LINK"
+  safe_symlink "$CONDA_PREFIX/bin/conda-env" "$SYSTEM_CONDA_ENV_LINK"
+}
+
+remove_managed_link() {
+  local target="$1" link="$2"
+
+  [[ -L "$link" ]] || return 0
+
+  if [[ "$(readlink -f "$link" 2>/dev/null || true)" == "$(readlink -f "$target" 2>/dev/null || true)" ]]; then
+    rm -f -- "$link"
+  fi
+}
+
+remove_system_links() {
+  require_root
+  remove_managed_link "$CONDA_BIN" "$SYSTEM_CONDA_LINK"
+  remove_managed_link "$CONDA_PREFIX/bin/conda-env" "$SYSTEM_CONDA_ENV_LINK"
+}
+
+self_install() {
+  require_root
+
+  local source_path
+  source_path="$(readlink -f "${BASH_SOURCE[0]}")"
+
+  if [[ "$source_path" != "$MANAGER_PATH" ]]; then
+    install -o root -g root -m 0755 "$source_path" "$MANAGER_PATH"
+    info "Manager installed: $MANAGER_PATH"
+  else
+    chown root:root "$MANAGER_PATH"
+    chmod 0755 "$MANAGER_PATH"
+  fi
+}
+
+configure_miniconda() {
+  require_root
+  [[ -x "$CONDA_BIN" ]] || die "Miniconda is not installed."
+
+  chown -R root:root "$CONDA_PREFIX"
+  chmod 0755 "$CONDA_PREFIX"
+
+  write_condarc
+  write_shell_profile
+  write_bash_bashrc_hook
+  install_system_links
+
+  local removed
+  removed="$(cleanup_legacy_user_profiles || true)"
+  if [[ -n "$removed" ]]; then
+    info "Removed obsolete per-user Miniconda manager blocks from:"
+    printf '%s\n' "$removed"
+  fi
+}
+
+install_fresh_miniconda() {
+  require_root
+  validate_prefix
+  [[ ! -e "$CONDA_PREFIX" ]] || die "$CONDA_PREFIX already exists."
+
+  local workdir installer
+  workdir="$(mktemp -d /tmp/miniconda-manager.XXXXXX)"
+  installer="$workdir/$(installer_filename)"
+
+  if ! download_installer "$installer" "$workdir"; then
+    rm -rf -- "$workdir"
+    die "Miniconda installer download/verification failed."
+  fi
+
+  info "The Miniconda batch installer is being run non-interactively."
+  if ! bash "$installer" -b -p "$CONDA_PREFIX"; then
+    rm -rf -- "$workdir"
+    die "Miniconda installer failed."
+  fi
+
+  rm -rf -- "$workdir"
+
+  [[ -x "$CONDA_BIN" ]] || die "Installer completed but $CONDA_BIN is missing."
+  chown -R root:root "$CONDA_PREFIX"
+}
+
+install_miniconda() {
+  require_root
+  require_ubuntu_2404
+  validate_prefix
+  acquire_lock
+
+  log "Installing Miniconda"
+  install_dependencies
+
+  if [[ -x "$CONDA_BIN" ]]; then
+    info "Existing functional Miniconda detected at $CONDA_PREFIX; preserving it."
+  elif [[ -e "$CONDA_PREFIX" ]]; then
+    die "A partial or corrupt prefix exists at $CONDA_PREFIX. Run '$0 repair'."
+  else
+    install_fresh_miniconda
+  fi
+
+  configure_miniconda
+  self_install
+
+  log "Installation complete"
+  verify_miniconda_unlocked
+}
+
+repair_miniconda() {
+  require_root
+  require_ubuntu_2404
+  validate_prefix
+  acquire_lock
+
+  log "Repairing Miniconda"
+  install_dependencies
+
+  if [[ -x "$CONDA_BIN" ]]; then
+    info "Functional Conda binary found; repairing policy, ownership and integration only."
+  elif [[ -e "$CONDA_PREFIX" ]]; then
+    local broken
+    broken="${CONDA_PREFIX}.broken-$(date -u +%Y%m%dT%H%M%SZ)"
+    warn "Incomplete prefix detected. Moving it aside to: $broken"
+    mv -- "$CONDA_PREFIX" "$broken"
+    install_fresh_miniconda
+  else
+    install_fresh_miniconda
+  fi
+
+  configure_miniconda
+  self_install
+
+  log "Repair complete"
+  verify_miniconda_unlocked
+}
+
+update_miniconda() {
+  require_root
+  require_ubuntu_2404
+  validate_prefix
+  acquire_lock
+  [[ -x "$CONDA_BIN" ]] || die "Miniconda is not installed. Run '$0 install'."
+
+  log "Updating Conda and base security packages"
+  conda_exec update \
+    -n base \
+    --solver libmamba \
+    conda ca-certificates certifi openssl \
+    -y
+
+  configure_miniconda
+  self_install
+
+  log "Update complete"
+  verify_miniconda_unlocked
+}
+
+reinstall_miniconda() {
+  require_root
+  require_ubuntu_2404
+  validate_prefix
+  acquire_lock
+
+  if [[ ! -x "$CONDA_BIN" ]]; then
+    warn "Miniconda is not currently functional; performing repair instead."
+    repair_miniconda_unlocked
+    return 0
+  fi
+
+  log "Reinstalling/updating the Miniconda base prefix in place"
+  info "Existing environments under $CONDA_PREFIX/envs are preserved."
+  install_dependencies
+
+  local workdir installer
+  workdir="$(mktemp -d /tmp/miniconda-manager.XXXXXX)"
+  installer="$workdir/$(installer_filename)"
+
+  if ! download_installer "$installer" "$workdir"; then
+    rm -rf -- "$workdir"
+    die "Miniconda installer download/verification failed."
+  fi
+
+  if ! bash "$installer" -b -u -p "$CONDA_PREFIX"; then
+    rm -rf -- "$workdir"
+    die "Miniconda in-place reinstall failed."
+  fi
+
+  rm -rf -- "$workdir"
+
+  configure_miniconda
+  self_install
+
+  log "Reinstall complete"
+  verify_miniconda_unlocked
+}
+
+# Internal repair path used only when reinstall already owns the manager lock.
+repair_miniconda_unlocked() {
+  install_dependencies
+
+  if [[ -x "$CONDA_BIN" ]]; then
+    :
+  elif [[ -e "$CONDA_PREFIX" ]]; then
+    local broken
+    broken="${CONDA_PREFIX}.broken-$(date -u +%Y%m%dT%H%M%SZ)"
+    warn "Incomplete prefix detected. Moving it aside to: $broken"
+    mv -- "$CONDA_PREFIX" "$broken"
+    install_fresh_miniconda
+  else
+    install_fresh_miniconda
+  fi
+
+  configure_miniconda
+  self_install
+  verify_miniconda_unlocked
+}
+
+disable_miniconda() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  log "Disabling Miniconda shell/command integration"
+  warn "The Miniconda prefix and all environments are preserved."
+
+  remove_bash_bashrc_hook
+  remove_shell_profile
+  remove_system_links
+  cleanup_legacy_user_profiles >/dev/null || true
+
+  info "Integration disabled. Data preserved at: $CONDA_PREFIX"
+  info "Use '$0 purge' only when permanent deletion is intended."
+}
+
+purge_miniconda() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  cat <<EOF_PURGE
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+DESTRUCTIVE OPERATION
+
+This permanently deletes:
+  $CONDA_PREFIX
+
+This includes the base environment, every environment under the prefix, and
+its package cache. No Linux user account is created, modified, or deleted.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+EOF_PURGE
+
+  local confirmation=""
+  read -r -p "Type DELETE-MINICONDA-DATA to continue: " confirmation
+  [[ "$confirmation" == "DELETE-MINICONDA-DATA" ]] || die "Purge cancelled."
+
+  remove_shell_profile
+  remove_system_links
+  cleanup_legacy_user_profiles >/dev/null || true
+
+  if [[ -e "$CONDA_PREFIX" ]]; then
+    [[ ! -L "$CONDA_PREFIX" ]] || die "Refusing to purge a symlinked prefix."
+    rm -rf --one-file-system -- "$CONDA_PREFIX"
+  fi
+
+  info "Miniconda data permanently deleted."
+  info "Manager retained at: $MANAGER_PATH"
+}
+
+shell_enable() {
+  require_root
+  validate_prefix
+  acquire_lock
+  [[ -x "$CONDA_BIN" ]] || die "Miniconda is not installed."
+
+  write_shell_profile
+  install_system_links
+  cleanup_legacy_user_profiles >/dev/null || true
+  info "System shell integration enabled; base auto-activation remains disabled."
+}
+
+shell_disable() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  remove_shell_profile
+  remove_system_links
+  cleanup_legacy_user_profiles >/dev/null || true
+  info "System shell integration disabled."
+}
+
+shell_status() {
+  require_root
+  validate_prefix
+
+  echo "Shell profile: $SHELL_PROFILE"
+  if [[ -f "$SHELL_PROFILE" ]] && grep -Fq 'Managed by miniconda-manager.' "$SHELL_PROFILE"; then
+    echo "System shell integration: ENABLED"
+  else
+    echo "System shell integration: DISABLED"
+  fi
+
+  if [[ -L "$SYSTEM_CONDA_LINK" ]]; then
+    echo "Conda command link: $(readlink "$SYSTEM_CONDA_LINK")"
+  elif [[ -e "$SYSTEM_CONDA_LINK" ]]; then
+    echo "Conda command link: UNMANAGED PATH EXISTS"
+  else
+    echo "Conda command link: not installed"
+  fi
+
+  echo "Legacy per-user manager blocks: $(legacy_profile_count)"
+}
+
+status_miniconda() {
+  require_root
+  validate_prefix
+
+  echo "=== Miniconda Manager ==="
+  echo "Manager version: $MANAGER_VERSION"
+  echo "Manager path:    $MANAGER_PATH"
+  echo "Prefix:          $CONDA_PREFIX"
+  echo "Ownership model: root-owned/system-wide"
+  echo
+
+  if [[ ! -x "$CONDA_BIN" ]]; then
+    echo "Miniconda: NOT INSTALLED"
+    shell_status
+    return 0
+  fi
+
+  echo "=== Versions ==="
+  conda_exec --version
+  python_exec --version
+  echo
+
+  echo "=== Base prefix ==="
+  conda_exec info --base
+  echo
+
+  echo "=== Environments ==="
+  conda_exec env list
+  echo
+
+  echo "=== Managed configuration ==="
+  local activation_key
+  activation_key="$(conda_auto_activate_key)"
+  conda_exec config --show \
+    "$activation_key" auto_update_conda channels solver channel_priority ssl_verify safety_checks
+  echo
+
+  echo "=== Integration ==="
+  shell_status
+  echo
+
+  echo "=== Ownership ==="
+  stat -c '%A %U:%G %n' "$CONDA_PREFIX" "$CONDARC_FILE" 2>/dev/null || true
+}
+
+verify_miniconda_unlocked() {
+  require_root
+  validate_prefix
+
+  echo "=== Miniconda verification ==="
+
+  echo "[1/10] OS and prefix safety"
+  require_ubuntu_2404
+  [[ ! -L "$CONDA_PREFIX" ]] || die "Managed prefix is a symlink."
+
+  echo "[2/10] Conda and Python binaries"
+  [[ -x "$CONDA_BIN" ]] || die "Missing Conda binary: $CONDA_BIN"
+  [[ -x "$CONDA_PYTHON" ]] || die "Missing Miniconda Python: $CONDA_PYTHON"
+  [[ -s "$CONDA_PREFIX/etc/profile.d/conda.sh" ]] || \
+    die "Missing Conda shell integration file."
+
+  echo "[3/10] Root ownership and managed-file permissions"
+  [[ "$(stat -c '%U:%G' "$CONDA_PREFIX")" == "root:root" ]] || \
+    die "Prefix must be owned by root:root."
+  [[ "$(stat -c '%U:%G' "$CONDARC_FILE")" == "root:root" ]] || \
+    die "Managed Conda config must be owned by root:root."
+  if (( (8#$(stat -c '%a' "$CONDARC_FILE") & 8#022) != 0 )); then
+    die "$CONDARC_FILE must not be group/world writable."
+  fi
+
+  echo "[4/10] Managed Conda policy"
+  local cfg activation_key
+  activation_key="$(conda_auto_activate_key)"
+  cfg="$(conda_exec config --show \
+    "$activation_key" auto_update_conda channels solver channel_priority ssl_verify safety_checks 2>&1)" || \
+    die "Unable to read Conda configuration: $cfg"
+
+  grep -Eqi "^${activation_key}:[[:space:]]*false$" <<<"$cfg" || \
+    die "$activation_key is not false."
+  grep -Eqi '^auto_update_conda:[[:space:]]*false$' <<<"$cfg" || \
+    die "auto_update_conda is not false."
+  local configured_channel
+  while IFS= read -r configured_channel; do
+    grep -Fq -- "- ${configured_channel}" <<<"$cfg" || \
+      die "Managed Conda channel is missing from effective configuration: ${configured_channel}"
+  done < <(configured_channels)
+  grep -Eq '^solver:[[:space:]]*libmamba$' <<<"$cfg" || \
+    die "libmamba solver is not configured."
+  grep -Eq '^channel_priority:[[:space:]]*strict$' <<<"$cfg" || \
+    die "strict channel priority is not configured."
+  grep -Eqi '^ssl_verify:[[:space:]]*true$' <<<"$cfg" || \
+    die "Conda SSL verification is not enabled."
+  grep -Eqi '^safety_checks:[[:space:]]*enabled$' <<<"$cfg" || \
+    die "Conda safety checks are not enabled."
+
+  echo "[5/10] Base prefix identity"
+  local base_prefix
+  base_prefix="$(conda_exec info --base 2>&1)" || die "Unable to read base prefix: $base_prefix"
+  [[ "$base_prefix" == "$CONDA_PREFIX" ]] || \
+    die "Conda reports base '$base_prefix'; expected '$CONDA_PREFIX'."
+
+  echo "[6/10] Local Python runtime"
+  local runtime
+  runtime="$(python_exec - <<'PY' 2>&1
+import bz2
+import lzma
+import sqlite3
+import ssl
+import sys
+print("miniconda-runtime-ok")
+assert sys.version_info.major == 3
+assert ssl.OPENSSL_VERSION
+assert sqlite3.sqlite_version
+PY
+)" || die "Miniconda Python runtime test failed: $runtime"
+  grep -Fq 'miniconda-runtime-ok' <<<"$runtime" || die "Unexpected Python runtime output."
+
+  echo "[7/10] System shell integration"
+  [[ -f "$SHELL_PROFILE" ]] || die "Missing system shell profile: $SHELL_PROFILE"
+  grep -Fq 'Managed by miniconda-manager.' "$SHELL_PROFILE" || \
+    die "System shell profile is not manager-owned."
+  grep -Fq "export CONDARC=\"$CONDARC_FILE\"" "$SHELL_PROFILE" || \
+    die "System shell profile does not point to the managed Conda policy."
+  grep -Fq "$CONDA_PREFIX/etc/profile.d/conda.sh" "$SHELL_PROFILE" || \
+    die "System shell profile does not load the managed Conda shell hook."
+
+  echo "[8/10] Interactive Bash activation integration"
+  [[ -f "$BASH_BASHRC" ]] || die "Missing system Bash rc: $BASH_BASHRC"
+  grep -Fq "$BASH_BEGIN" "$BASH_BASHRC" || \
+    die "System Bash rc does not contain the managed Miniconda hook."
+  grep -Fq "$SHELL_PROFILE" "$BASH_BASHRC" || \
+    die "System Bash rc does not source the Miniconda profile hook."
+
+  echo "[9/10] Command links"
+  if [[ -e "$SYSTEM_CONDA_LINK" || -L "$SYSTEM_CONDA_LINK" ]]; then
+    if [[ -L "$SYSTEM_CONDA_LINK" ]]; then
+      [[ "$(readlink -f "$SYSTEM_CONDA_LINK")" == "$(readlink -f "$CONDA_BIN")" ]] || \
+        warn "$SYSTEM_CONDA_LINK points somewhere else; manager did not overwrite it."
+    else
+      warn "$SYSTEM_CONDA_LINK is an unmanaged path; manager did not overwrite it."
+    fi
+  else
+    warn "$SYSTEM_CONDA_LINK is absent. Conda remains available at $CONDA_BIN."
+  fi
+
+  echo "[10/10] Legacy per-user manager mappings"
+  local legacy_count
+  legacy_count="$(legacy_profile_count)"
+  [[ "$legacy_count" == "0" ]] || \
+    die "Found $legacy_count obsolete per-user Miniconda manager block(s). Run '$0 repair'."
+
+  echo
+  echo "MINICONDA: VERIFIED"
+  echo "Conda:  $(conda_exec --version)"
+  echo "Python: $(python_exec --version 2>&1)"
+  echo "Prefix: $CONDA_PREFIX"
+  echo "Owner:  root:root"
+  echo "Channels: $(configured_channels | paste -sd, -)"
+  echo "Solver: libmamba"
+  echo "Base auto-activation: disabled"
+}
+
+verify_miniconda() {
+  require_root
+  acquire_lock
+  verify_miniconda_unlocked
+}
+
+show_version() {
+  require_root
+  validate_prefix
+
+  echo "miniconda-manager $MANAGER_VERSION"
+  [[ -x "$CONDA_BIN" ]] || return 0
+  conda_exec --version
+  python_exec --version
+  conda_exec info --base
+}
+
+list_envs() {
+  require_root
+  validate_prefix
+  conda_exec env list
+}
+
+set_channels() {
+  require_root
+  validate_prefix
+  acquire_lock
+  (($# > 0)) || die "Usage: $0 set-channels CHANNEL [CHANNEL...]"
+
+  local channel tmp
+  tmp="$(mktemp /etc/.miniconda-manager.channels.XXXXXX)"
+  for channel in "$@"; do
+    validate_channel_token "$channel" || {
+      rm -f -- "$tmp"
+      die "Invalid Conda channel: $channel"
+    }
+    printf '%s\n' "$channel" >>"$tmp"
+  done
+
+  chown root:root "$tmp"
+  chmod 0644 "$tmp"
+  mv -f -- "$tmp" "$CHANNEL_POLICY_FILE"
+
+  if [[ -x "$CONDA_BIN" ]]; then
+    write_condarc
+  fi
+
+  info "Persistent Conda channel policy updated: $CHANNEL_POLICY_FILE"
+  show_channels
+}
+
+reset_channels() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  rm -f -- "$CHANNEL_POLICY_FILE"
+  if [[ -x "$CONDA_BIN" ]]; then
+    write_condarc
+  fi
+
+  info "Conda channel policy reset to default: $CONDA_CHANNELS"
+  show_channels
+}
+
+show_channels() {
+  require_root
+  validate_prefix
+  [[ -x "$CONDA_BIN" ]] || die "Miniconda is not installed."
+
+  echo "=== Conda channels ==="
+  if [[ -f "$CHANNEL_POLICY_FILE" ]]; then
+    echo "Policy source: $CHANNEL_POLICY_FILE"
+  else
+    echo "Policy source: CONDA_CHANNELS/default ($CONDA_CHANNELS)"
+  fi
+  conda_exec config --show channels channel_priority show_channel_urls
+}
+
+
+use_conda_forge() {
+  require_root
+  info "Selecting conda-forge as the single global package channel."
+  set_channels conda-forge
+}
+
+use_anaconda_defaults() {
+  require_root
+
+  cat <<'EOF'
+Anaconda "defaults" requires acceptance of the applicable Anaconda Terms of
+Service before packages can be installed from repo.anaconda.com.
+
+nginx-manager/miniconda-manager policy does NOT auto-accept legal terms.
+
+This command only selects the channel. It does not accept any Terms of Service.
+After switching, inspect the terms/status with:
+
+  miniconda-manager tos-status
+  miniconda-manager tos-view
+
+If you decide to accept them, run:
+
+  miniconda-manager tos-accept-anaconda
+EOF
+
+  local answer=""
+  read -r -p "Type USE-ANACONDA-DEFAULTS to switch channels: " answer
+  [[ "$answer" == "USE-ANACONDA-DEFAULTS" ]] || die "Channel switch cancelled."
+
+  set_channels defaults
+}
+
+tos_plugin_available() {
+  conda_exec tos --help >/dev/null 2>&1
+}
+
+tos_status() {
+  require_root
+  validate_prefix
+  [[ -x "$CONDA_BIN" ]] || die "Miniconda is not installed."
+
+  if ! tos_plugin_available; then
+    echo "conda-anaconda-tos plugin: NOT AVAILABLE"
+    return 0
+  fi
+
+  conda_exec tos
+}
+
+tos_view() {
+  require_root
+  validate_prefix
+  [[ -x "$CONDA_BIN" ]] || die "Miniconda is not installed."
+  tos_plugin_available || die "conda-anaconda-tos plugin is not available."
+  conda_exec tos view
+}
+
+tos_accept_anaconda() {
+  require_root
+  validate_prefix
+  acquire_lock
+  [[ -x "$CONDA_BIN" ]] || die "Miniconda is not installed."
+  tos_plugin_available || die "conda-anaconda-tos plugin is not available."
+
+  cat <<'EOF'
+LEGAL CONFIRMATION REQUIRED
+
+You are about to record acceptance of Anaconda's Terms of Service for:
+
+  https://repo.anaconda.com/pkgs/main
+  https://repo.anaconda.com/pkgs/r
+
+The manager cannot determine whether those terms are appropriate for your
+organization. Review them first:
+
+  miniconda-manager tos-view
+
+No acceptance occurs unless you explicitly confirm below.
+EOF
+
+  local confirmation=""
+  read -r -p "Type I-ACCEPT-ANACONDA-TOS to continue: " confirmation
+  [[ "$confirmation" == "I-ACCEPT-ANACONDA-TOS" ]] || die "ToS acceptance cancelled."
+
+  conda_exec tos accept \
+    --override-channels \
+    --channel https://repo.anaconda.com/pkgs/main
+
+  conda_exec tos accept \
+    --override-channels \
+    --channel https://repo.anaconda.com/pkgs/r
+
+  info "Requested Anaconda ToS acceptance commands completed."
+  conda_exec tos
+}
+
+validate_env_name() {
+  local name="$1"
+  [[ ${#name} -le 64 ]] || return 1
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]
+}
+
+reserved_env_name() {
+  [[ "$1" == "base" ]]
+}
+
+validate_python_version() {
+  [[ "$1" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]
+}
+
+create_env() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  local name="${1:-}"
+  local python_version="${2:-}"
+
+  [[ -n "$name" ]] || die "Usage: $0 create-env NAME [PYTHON_VERSION]"
+  validate_env_name "$name" || die "Invalid environment name: $name"
+  reserved_env_name "$name" && die "'base' is reserved."
+
+  local args=(create -n "$name" --solver libmamba -y)
+  if [[ -n "$python_version" ]]; then
+    validate_python_version "$python_version" || die "Invalid Python version: $python_version"
+    args+=("python=$python_version")
+  else
+    args+=(python)
+  fi
+
+  conda_exec "${args[@]}"
+  info "Environment created: $name"
+}
+
+remove_env() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "Usage: $0 remove-env NAME"
+  validate_env_name "$name" || die "Invalid environment name: $name"
+  reserved_env_name "$name" && die "Refusing to remove base."
+
+  local answer=""
+  read -r -p "Delete Conda environment '$name'? [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || die "Environment deletion cancelled."
+
+  conda_exec env remove -n "$name" -y
+}
+
+update_env() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "Usage: $0 update-env NAME"
+  validate_env_name "$name" || die "Invalid environment name: $name"
+
+  conda_exec update -n "$name" --all --solver libmamba -y
+}
+
+export_env() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  local name="${1:-}"
+  local file="${2:-}"
+  [[ -n "$name" ]] || die "Usage: $0 export-env NAME [FILE]"
+  validate_env_name "$name" || die "Invalid environment name: $name"
+
+  if [[ -z "$file" ]]; then
+    file="$(pwd)/${name}-environment.yml"
+  elif [[ "$file" != /* ]]; then
+    file="$(pwd)/$file"
+  fi
+
+  local dir tmp
+  dir="$(dirname "$file")"
+  [[ -d "$dir" ]] || die "Destination directory does not exist: $dir"
+  tmp="$(mktemp "$dir/.miniconda-export.XXXXXX")"
+
+  if ! conda_exec env export -n "$name" --no-builds >"$tmp"; then
+    rm -f -- "$tmp"
+    die "Failed to export environment: $name"
+  fi
+
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$file"
+  info "Environment exported with mode 0600: $file"
+}
+
+clone_env() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  local source="${1:-}"
+  local target="${2:-}"
+
+  [[ -n "$source" && -n "$target" ]] || die "Usage: $0 clone-env SOURCE TARGET"
+  validate_env_name "$source" || die "Invalid source environment name: $source"
+  validate_env_name "$target" || die "Invalid target environment name: $target"
+  reserved_env_name "$target" && die "'base' is reserved as a clone target."
+
+  conda_exec create -n "$target" --clone "$source" -y
+}
+
+list_packages() {
+  require_root
+  validate_prefix
+
+  local env_name="${1:-base}"
+  validate_env_name "$env_name" || die "Invalid environment name: $env_name"
+  conda_exec list -n "$env_name"
+}
+
+run_in_env() {
+  require_root
+  validate_prefix
+
+  local env_name="${1:-}"
+  shift || true
+
+  [[ -n "$env_name" ]] || die "Usage: $0 run ENV COMMAND..."
+  validate_env_name "$env_name" || die "Invalid environment name: $env_name"
+  (($# > 0)) || die "Usage: $0 run ENV COMMAND..."
+
+  conda_exec run -n "$env_name" --no-capture-output "$@"
+}
+
+clean_conda() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  # Keep extracted package cache for fast future environment creation/cloning.
+  conda_exec clean --index-cache --tarballs -y
+  info "Index cache and package archives cleaned; extracted package cache preserved for speed."
+}
+
+clean_conda_all() {
+  require_root
+  validate_prefix
+  acquire_lock
+
+  warn "This removes all Conda caches and may make the next install/create operation slower."
+  local answer=""
+  read -r -p "Run full 'conda clean --all'? [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || die "Full cache cleanup cancelled."
+
+  conda_exec clean --all -y
+}
+
+help_text() {
+  cat <<EOF_HELP
+Miniconda Manager v$MANAGER_VERSION
+
+Usage:
+  sudo miniconda-manager <command> [arguments]
+  sudo bash miniconda-manager <command> [arguments]
+
+Lifecycle:
+  install                  Install/configure Miniconda at $CONDA_PREFIX
+  repair                   Repair an incomplete install without deleting it silently
+  update                   Update Conda + base CA/certificate/OpenSSL packages
+  reinstall                Verified in-place Miniconda reinstall/update; preserve envs
+  delete                   Disable shell/command integration; preserve all Conda data
+  purge                    Permanently delete the managed prefix and all its envs
+
+Inspection:
+  status
+  verify
+  version
+  envs
+  shell-status             Alias: profile-status
+  channels                 Show effective configured package channels
+  set-channels CH...       Persist an ordered channel list and rewrite managed .condarc
+  reset-channels           Remove custom policy and restore default channel list
+  use-conda-forge          Select conda-forge as the single global package channel
+  use-anaconda-defaults    Select Anaconda defaults; does NOT accept ToS
+  tos-status               Display conda-anaconda-tos channel/acceptance table
+  tos-view                 Display links for applicable Terms of Service
+  tos-accept-anaconda      Explicitly accept main/r ToS after typed confirmation
+
+Environment management:
+  create-env NAME [PYTHON_VERSION]
+  remove-env NAME
+  update-env NAME
+  export-env NAME [FILE]
+  clone-env SOURCE TARGET
+  packages [ENV]
+
+Execution:
+  run ENV COMMAND...
+
+Shell integration:
+  enable-shell
+  disable-shell
+
+Maintenance:
+  clean                    Clean index cache/tarballs; preserve extracted package cache
+  clean-all                Full Conda cache cleanup with confirmation
+
+Defaults:
+  Prefix:   $CONDA_PREFIX
+  Owner:    root:root
+  Config:   $CONDARC_FILE
+  Profile:  $SHELL_PROFILE
+  Bash rc:   $BASH_BASHRC
+  Manager:  $MANAGER_PATH
+
+Examples:
+  sudo bash miniconda-manager install
+  sudo miniconda-manager verify
+  sudo miniconda-manager use-conda-forge
+  sudo miniconda-manager create-env research 3.13
+  sudo miniconda-manager run research python --version
+  sudo miniconda-manager export-env research /srv/backups/research.yml
+  sudo miniconda-manager update-env research
+
+Security / performance policy:
+  - No dedicated Linux-user mapping or per-user Conda ownership is used.
+  - No per-user 'conda init' is run; the manager owns a system Bash hook and base stays inactive.
+  - Old per-user blocks created by earlier revisions are removed by exact marker.
+  - Conda runs with a sanitized Python/Conda environment and a dedicated CONDARC.
+  - Installer downloads use HTTPS and are checked against Anaconda's published SHA-256.
+  - MINICONDA_SHA256 may be set to a trusted 64-hex pin for reproducible deployments.
+  - Root owns the prefix; the manager never symlinks Miniconda Python/Pip over OS tools.
+  - A non-empty channel list is always written; default is conda-forge only.
+  - Custom channel order can be persisted in /etc/miniconda-manager.channels.
+  - libmamba and strict channel priority are configured for fast, consistent solving.
+  - Anaconda defaults are opt-in; the manager never silently accepts Anaconda ToS.
+  - Review channel licensing/terms for your organization's use case.
+  - Default clean preserves extracted packages to keep later environment creation fast.
+
+Environment overrides:
+  CONDA_PREFIX=/opt/miniconda3
+  CONDA_CHANNELS=conda-forge
+  # Explicit alternate policy: CONDA_CHANNELS=defaults
+  MINICONDA_SHA256=<64-hex trusted pin>
+  LOCK_TIMEOUT=120
+  APT_LOCK_TIMEOUT=600
+EOF_HELP
+}
+
+main() {
+  local command="${1:-help}"
+
+  case "$command" in
+    install)
+      install_miniconda
+      ;;
+    repair)
+      repair_miniconda
+      ;;
+    update)
+      update_miniconda
+      ;;
+    reinstall)
+      reinstall_miniconda
+      ;;
+    delete|remove|uninstall)
+      disable_miniconda
+      ;;
+    purge)
+      purge_miniconda
+      ;;
+    status)
+      status_miniconda
+      ;;
+    verify)
+      verify_miniconda
+      ;;
+    version)
+      show_version
+      ;;
+    envs|list-envs)
+      list_envs
+      ;;
+    channels|channel-status)
+      show_channels
+      ;;
+    set-channels)
+      shift
+      set_channels "$@"
+      ;;
+    reset-channels)
+      reset_channels
+      ;;
+    use-conda-forge)
+      use_conda_forge
+      ;;
+    use-anaconda-defaults)
+      use_anaconda_defaults
+      ;;
+    tos-status)
+      tos_status
+      ;;
+    tos-view)
+      tos_view
+      ;;
+    tos-accept-anaconda)
+      tos_accept_anaconda
+      ;;
+    create-env)
+      shift
+      create_env "${1:-}" "${2:-}"
+      ;;
+    remove-env)
+      shift
+      remove_env "${1:-}"
+      ;;
+    update-env)
+      shift
+      update_env "${1:-}"
+      ;;
+    export-env)
+      shift
+      export_env "${1:-}" "${2:-}"
+      ;;
+    clone-env)
+      shift
+      clone_env "${1:-}" "${2:-}"
+      ;;
+    packages)
+      shift
+      list_packages "${1:-base}"
+      ;;
+    run)
+      shift
+      run_in_env "$@"
+      ;;
+    clean)
+      clean_conda
+      ;;
+    clean-all)
+      clean_conda_all
+      ;;
+    enable-shell)
+      shell_enable
+      ;;
+    disable-shell)
+      shell_disable
+      ;;
+    shell-status|profile-status)
+      shell_status
+      ;;
+    help|-h|--help)
+      help_text
+      ;;
+    *)
+      help_text
+      echo
+      die "Unknown command: $command"
+      ;;
+  esac
+}
+
+main "$@"

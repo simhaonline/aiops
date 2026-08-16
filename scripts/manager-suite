@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+readonly SUITE_VERSION="1.0.1"
+readonly MANAGERS=(
+  system-manager
+  docker-manager
+  gvm-manager
+  miniconda-manager
+  nvm-manager
+  ollama-manager
+  harness-manager
+  nginx-manager
+  wireguard-manager
+  hermes-manager
+  codex-manager
+  claude-manager
+  opencode-manager
+  freebuff-manager
+  litellm-manager
+  llmrouter-manager
+)
+
+say(){ printf '%-22s %s\n' "$1" "$2"; }
+
+runtime_present() {
+  case "$1" in
+    system-manager) [[ -r /var/lib/simha-system-manager/config ]] ;;
+    docker-manager) command -v docker >/dev/null 2>&1 ;;
+    gvm-manager) [[ -s /root/.gvm/scripts/gvm ]] ;;
+    miniconda-manager) [[ -x /opt/miniconda3/bin/conda ]] ;;
+    nvm-manager) [[ -s /root/.nvm/nvm.sh ]] ;;
+    ollama-manager) command -v ollama >/dev/null 2>&1 ;;
+    harness-manager) [[ -d /opt/deepseek-harness/app && -f /etc/systemd/system/deepseek-harness.service ]] ;;
+    nginx-manager) command -v nginx >/dev/null 2>&1 ;;
+    wireguard-manager) [[ -f /etc/wireguard/wg0.conf ]] ;;
+    hermes-manager) [[ -d /var/lib/hermes-agent/.hermes ]] ;;
+    codex-manager) [[ -x /root/.local/bin/codex ]] ;;
+    claude-manager) command -v claude >/dev/null 2>&1 ;;
+    opencode-manager) [[ -x /root/.nvm/default-bin/opencode ]] ;;
+    freebuff-manager) [[ -x /root/.nvm/default-bin/freebuff ]] ;;
+    litellm-manager) [[ -x /opt/litellm/current/bin/litellm ]] ;;
+    llmrouter-manager) [[ -x /root/.nvm/default-bin/lmrouter ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+manager_version() {
+  local m="$1"
+  case "$m" in
+    nvm-manager|ollama-manager) "$m" manager-version 2>/dev/null | head -2 || true ;;
+    *) "$m" version 2>/dev/null | head -2 || true ;;
+  esac
+}
+
+versions() {
+  echo "SIMHA Manager Suite $SUITE_VERSION"
+  local m out
+  for m in "${MANAGERS[@]}"; do
+    if ! command -v "$m" >/dev/null 2>&1; then
+      say "$m" "MANAGER NOT INSTALLED"
+      continue
+    fi
+    out="$(manager_version "$m")"
+    if runtime_present "$m"; then
+      say "$m" "${out//$'\n'/ | }"
+    else
+      say "$m" "manager installed; runtime not installed${out:+ | ${out//$'\n'/ | }}"
+    fi
+  done
+}
+
+verify() {
+  local strict="${1:-no}" failed=0 m
+  for m in "${MANAGERS[@]}"; do
+    if ! command -v "$m" >/dev/null 2>&1; then
+      if [[ "$strict" == yes ]]; then say "$m" "FAILED (manager missing)"; failed=1; else say "$m" "SKIP (manager missing)"; fi
+      continue
+    fi
+    if ! runtime_present "$m"; then
+      if [[ "$strict" == yes ]]; then say "$m" "FAILED (runtime missing)"; failed=1; else say "$m" "SKIP (runtime not installed)"; fi
+      continue
+    fi
+    if "$m" verify >"/tmp/manager-suite-${m}.log" 2>&1; then
+      say "$m" "VERIFIED"
+    else
+      say "$m" "FAILED"
+      sed -n '1,100p' "/tmp/manager-suite-${m}.log"
+      failed=1
+    fi
+  done
+  rm -f /tmp/manager-suite-*.log
+  (( failed == 0 ))
+}
+
+status() {
+  versions
+  echo
+  local m
+  for m in "${MANAGERS[@]}"; do
+    command -v "$m" >/dev/null 2>&1 || continue
+    runtime_present "$m" || continue
+    echo "===== $m ====="
+    "$m" status 2>&1 | sed -n '1,40p' || true
+    echo
+  done
+}
+
+install_order() {
+  cat <<'EOF'
+SIMHA AiOps recommended runtime installation order
+
+Phase 1 - Base operating system
+  1. system-manager
+
+Phase 2 - Core runtimes
+  2. docker-manager
+  3. gvm-manager
+  4. miniconda-manager
+  5. nvm-manager
+
+Phase 3 - AI runtime and edge
+  6. ollama-manager
+  7. nginx-manager
+  8. wireguard-manager
+
+Phase 4 - AI agents
+  9. harness-manager
+ 10. hermes-manager
+ 11. codex-manager
+ 12. claude-manager
+ 13. opencode-manager
+ 14. freebuff-manager
+
+Phase 5 - AI gateways / routing
+ 15. litellm-manager
+ 16. llmrouter-manager
+
+Phase 6 - Suite health gate
+ 17. manager-suite
+
+The one-line bootstrap installs manager SCRIPT files only. Runtime installation
+remains explicit; run '<manager> install' only for the components you need.
+EOF
+}
+
+dependencies() {
+  cat <<'EOF'
+Manager dependency map
+
+system-manager
+  Ubuntu 24.04 LTS; establishes base packages/security policy.
+
+docker-manager
+  system-manager recommended; host Docker plus optional managed rootless Docker.
+
+gvm-manager
+  system-manager recommended; root-scoped Go runtime.
+
+miniconda-manager
+  system-manager recommended; system-wide Miniconda at /opt/miniconda3.
+
+nvm-manager
+  system-manager recommended; root-scoped NVM/Node/PM2.
+
+ollama-manager
+  system-manager recommended; loopback Ollama API and Ollama Cloud policy.
+
+nginx-manager
+  system-manager recommended; optional integration with Harness and Hermes.
+
+wireguard-manager
+  system-manager recommended; independent VPN service.
+
+harness-manager
+  REQUIRES nvm-manager AND ollama-manager for the configured Ollama provider.
+  nginx-manager is optional for the HTTPS public edge.
+
+hermes-manager
+  Uses the base build packages installed by system-manager.
+  nginx-manager is optional for the HTTPS dashboard edge.
+
+codex-manager
+  Uses system base utilities; Codex runtime is independently managed.
+
+claude-manager
+  Uses system base utilities and Anthropic's signed package source.
+
+opencode-manager
+  REQUIRES nvm-manager; nginx-manager optional for localhost server edge.
+
+freebuff-manager
+  REQUIRES nvm-manager.
+
+litellm-manager
+  Uses Python/venv/build baseline; nginx-manager optional for API edge.
+
+llmrouter-manager
+  REQUIRES nvm-manager; nginx-manager optional for API edge.
+
+manager-suite
+  No runtime dependency; discovers managers and coordinates health reporting.
+EOF
+}
+
+help() {
+  cat <<EOF2
+manager-suite $SUITE_VERSION
+
+Commands:
+  versions     Show manager/runtime versions
+  verify       Verify only runtimes that are actually installed
+  verify-all   Strict verification; missing manager/runtime is a failure
+  status       Concise status for installed runtimes
+  install-order  Show recommended runtime installation sequence
+  dependencies   Show manager dependency map
+  help
+EOF2
+}
+
+case "${1:-help}" in
+  versions|version) versions ;;
+  verify) verify no ;;
+  verify-all) verify yes ;;
+  status) status ;;
+  install-order|order) install_order ;;
+  dependencies|deps) dependencies ;;
+  help|-h|--help) help ;;
+  *) help; exit 2 ;;
+esac

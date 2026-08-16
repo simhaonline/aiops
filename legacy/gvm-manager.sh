@@ -1,0 +1,1105 @@
+#!/usr/bin/env bash
+# LEGACY SUPPORT SNAPSHOT
+# Suite archive: pre-1.0.1 internal manager lineage
+# This file is NOT installed on PATH and is preserved for rollback/reference only.
+readonly AIOPS_LEGACY_RELEASE="1.0.1"
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+# =============================================================================
+# SIMHA GVM / Go Version Manager
+# Manager revision: 3.1.0
+# Target OS: Ubuntu 24.04 LTS
+#
+# Design:
+#   - Root-managed only; no mapped service/user account.
+#   - GVM lives at /root/.gvm.
+#   - One controlled shell block is managed in /root/.bashrc.
+#   - Manager installs to /usr/local/bin/gvm-manager.
+#   - Routine Go installs use GVM binary-only mode (-B) for speed/reliability.
+#   - No eval, no curl-to-shell pipeline, no profile sourcing during operations.
+#   - Mutating commands are serialized with flock.
+#
+# Commands:
+#   install | repair | update | reinstall | delete | purge
+#   status | verify | version | current | list | listall | env
+#   install-go VERSION | install-go-source VERSION | uninstall-go VERSION
+#   use VERSION | set-default VERSION
+#   pkgsets | pkgset-create NAME | pkgset-use NAME | pkgset-delete NAME
+#   help
+# =============================================================================
+
+readonly MANAGER_VERSION="3.1.0"
+readonly MANAGER_PATH="/usr/local/bin/gvm-manager"
+readonly ROOT_HOME="/root"
+readonly GVM_ROOT="/root/.gvm"
+readonly PROFILE_FILE="/root/.bashrc"
+readonly LOCK_FILE="/run/lock/gvm-manager.lock"
+readonly GVM_REPOSITORY="https://github.com/moovweb/gvm.git"
+readonly GVM_RAW_BASE="https://raw.githubusercontent.com/moovweb/gvm"
+readonly PROFILE_BEGIN="# >>> SIMHA GVM MANAGED BLOCK >>>"
+readonly PROFILE_END="# <<< SIMHA GVM MANAGED BLOCK <<<"
+
+GVM_BRANCH="${GVM_BRANCH:-master}"
+GO_DEFAULT_VERSION="${GO_DEFAULT_VERSION:-go1.26.6}"
+APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-600}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-180}"
+GVM_INSTALLER_SHA256="${GVM_INSTALLER_SHA256:-}"
+
+LOCK_HELD=0
+
+log()  { printf '\n==> %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+
+on_error() {
+  local rc=$?
+  local line="${BASH_LINENO[0]:-unknown}"
+  printf '[ERROR] Command failed at line %s (exit %s).\n' "$line" "$rc" >&2
+  exit "$rc"
+}
+trap on_error ERR
+
+require_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || \
+    die "Run as root, for example: sudo $0 ${1:-status}"
+}
+
+require_ubuntu_2404() {
+  [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."
+
+  local id version pretty
+  id="$(. /etc/os-release; printf '%s' "${ID:-}")"
+  version="$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")"
+  pretty="$(. /etc/os-release; printf '%s' "${PRETTY_NAME:-unknown}")"
+
+  [[ "$id" == "ubuntu" ]] || die "This manager supports Ubuntu only."
+  [[ "$version" == "24.04" ]] || \
+    die "This manager is validated for Ubuntu 24.04 LTS. Found: $pretty"
+}
+
+validate_runtime_settings() {
+  [[ "$APT_LOCK_TIMEOUT" =~ ^[0-9]+$ ]] || die "APT_LOCK_TIMEOUT must be an integer."
+  [[ "$CURL_CONNECT_TIMEOUT" =~ ^[0-9]+$ ]] || die "CURL_CONNECT_TIMEOUT must be an integer."
+  [[ "$CURL_MAX_TIME" =~ ^[0-9]+$ ]] || die "CURL_MAX_TIME must be an integer."
+
+  [[ "$GVM_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || die "Invalid GVM_BRANCH: $GVM_BRANCH"
+  [[ "$GVM_BRANCH" != -* ]] || die "GVM_BRANCH must not begin with '-'."
+  [[ "$GVM_BRANCH" != *".."* ]] || die "GVM_BRANCH must not contain '..'."
+  [[ "$GVM_BRANCH" != *"//"* ]] || die "GVM_BRANCH must not contain '//'."
+
+  if [[ -n "$GVM_INSTALLER_SHA256" ]]; then
+    [[ "$GVM_INSTALLER_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]] || \
+      die "GVM_INSTALLER_SHA256 must be a 64-character SHA-256 value."
+  fi
+}
+
+assert_safe_paths() {
+  [[ "$ROOT_HOME" == "/root" ]] || die "Unsafe ROOT_HOME: $ROOT_HOME"
+  [[ "$GVM_ROOT" == "/root/.gvm" ]] || die "Unsafe GVM_ROOT: $GVM_ROOT"
+  [[ "$PROFILE_FILE" == "/root/.bashrc" ]] || die "Unsafe PROFILE_FILE: $PROFILE_FILE"
+
+  if [[ -L "$GVM_ROOT" ]]; then
+    die "Refusing to manage symlinked GVM root: $GVM_ROOT"
+  fi
+}
+
+acquire_lock() {
+  [[ "$LOCK_HELD" -eq 1 ]] && return 0
+
+  require_root
+  mkdir -p /run/lock
+  exec 9>"$LOCK_FILE"
+
+  if ! flock -w 60 9; then
+    die "Another gvm-manager operation is active: $LOCK_FILE"
+  fi
+
+  LOCK_HELD=1
+}
+
+apt_cmd() {
+  DEBIAN_FRONTEND=noninteractive \
+    apt-get \
+      -o "DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT" \
+      -o Acquire::Retries=3 \
+      "$@"
+}
+
+install_dependencies() {
+  require_root
+  require_ubuntu_2404
+
+  local packages=(
+    ca-certificates
+    curl
+    git
+    mercurial
+    make
+    binutils
+    bison
+    gcc
+    build-essential
+  )
+  local missing=()
+  local pkg
+
+  for pkg in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
+      missing+=("$pkg")
+    fi
+  done
+
+  if ((${#missing[@]} == 0)); then
+    info "GVM build/runtime dependencies are already installed."
+    return 0
+  fi
+
+  log "Installing missing dependencies: ${missing[*]}"
+  apt_cmd update
+  apt_cmd install -y --no-install-recommends "${missing[@]}"
+}
+
+self_install() {
+  require_root
+
+  local source_path
+  source_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+
+  if [[ "$source_path" == "$MANAGER_PATH" ]]; then
+    chown root:root "$MANAGER_PATH"
+    chmod 0755 "$MANAGER_PATH"
+    return 0
+  fi
+
+  install -o root -g root -m 0755 -- "$source_path" "$MANAGER_PATH"
+  info "Manager installed: $MANAGER_PATH"
+}
+
+profile_without_managed_lines() {
+  local source="$1"
+
+  awk \
+    -v begin="$PROFILE_BEGIN" \
+    -v end="$PROFILE_END" \
+    -v root="$GVM_ROOT" '
+      $0 == begin { inside=1; next }
+      inside && $0 == end { inside=0; next }
+      inside { next }
+
+      $0 == "[[ -s \"" root "/scripts/gvm\" ]] && source \"" root "/scripts/gvm\"" { next }
+      $0 == "[ -s \"" root "/scripts/gvm\" ] && source \"" root "/scripts/gvm\"" { next }
+      $0 == "[[ -s \"" root "/scripts/gvm\" ]] && . \"" root "/scripts/gvm\"" { next }
+      $0 == "[ -s \"" root "/scripts/gvm\" ] && . \"" root "/scripts/gvm\"" { next }
+
+      { print }
+    ' "$source"
+}
+
+remove_profile_block() {
+  require_root
+  [[ -e "$PROFILE_FILE" ]] || return 0
+  [[ ! -L "$PROFILE_FILE" ]] || die "Refusing to modify symlinked profile: $PROFILE_FILE"
+
+  local tmp
+  tmp="$(mktemp "${PROFILE_FILE}.tmp.XXXXXX")"
+
+  if ! profile_without_managed_lines "$PROFILE_FILE" >"$tmp"; then
+    rm -f -- "$tmp"
+    die "Failed to clean GVM profile block."
+  fi
+
+  # Normalize trailing blank lines without changing unrelated profile content.
+  awk '
+    { lines[NR]=$0 }
+    END {
+      last=NR
+      while (last > 0 && lines[last] == "") last--
+      for (i=1; i<=last; i++) print lines[i]
+      if (last > 0) print ""
+    }
+  ' "$tmp" >"${tmp}.normalized"
+
+  install -o root -g root -m 0644 -- "${tmp}.normalized" "$PROFILE_FILE"
+  rm -f -- "$tmp" "${tmp}.normalized"
+}
+
+write_profile_block() {
+  require_root
+
+  if [[ ! -e "$PROFILE_FILE" ]]; then
+    install -o root -g root -m 0644 /dev/null "$PROFILE_FILE"
+  fi
+
+  [[ ! -L "$PROFILE_FILE" ]] || die "Refusing to modify symlinked profile: $PROFILE_FILE"
+
+  remove_profile_block
+
+  cat >>"$PROFILE_FILE" <<EOF_PROFILE
+$PROFILE_BEGIN
+export GVM_ROOT="$GVM_ROOT"
+export GVM_NO_GIT_BAK=1
+if [[ -s "\$GVM_ROOT/scripts/gvm" ]]; then
+  source "\$GVM_ROOT/scripts/gvm"
+fi
+$PROFILE_END
+EOF_PROFILE
+
+  chown root:root "$PROFILE_FILE"
+  chmod 0644 "$PROFILE_FILE"
+}
+
+require_gvm() {
+  assert_safe_paths
+  [[ -s "$GVM_ROOT/scripts/gvm" ]] || \
+    die "GVM is not installed or incomplete: $GVM_ROOT/scripts/gvm"
+}
+
+gvm_exec() {
+  require_root
+  require_gvm
+  (($# > 0)) || die "Internal error: gvm_exec requires a command."
+
+  env -i \
+    HOME="$ROOT_HOME" \
+    USER=root \
+    LOGNAME=root \
+    SHELL=/bin/bash \
+    LANG="${LANG:-C.UTF-8}" \
+    LC_ALL="${LC_ALL:-}" \
+    TERM="${TERM:-dumb}" \
+    GVM_ROOT="$GVM_ROOT" \
+    GVM_NO_GIT_BAK=1 \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    bash --noprofile --norc -c '
+      cd "$HOME"
+      # shellcheck disable=SC1090
+      source "$GVM_ROOT/scripts/gvm"
+      "$@"
+    ' bash "$@"
+}
+
+gvm_exec_in_dir() {
+  require_root
+  require_gvm
+  local dir="$1"
+  shift
+  (($# > 0)) || die "Internal error: gvm_exec_in_dir requires a command."
+  [[ -d "$dir" ]] || die "Directory does not exist: $dir"
+
+  env -i \
+    HOME="$ROOT_HOME" \
+    USER=root \
+    LOGNAME=root \
+    SHELL=/bin/bash \
+    LANG="${LANG:-C.UTF-8}" \
+    LC_ALL="${LC_ALL:-}" \
+    TERM="${TERM:-dumb}" \
+    GVM_ROOT="$GVM_ROOT" \
+    GVM_NO_GIT_BAK=1 \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    bash --noprofile --norc -c '
+      target_dir="$1"
+      shift
+      # shellcheck disable=SC1090
+      source "$GVM_ROOT/scripts/gvm"
+      cd "$target_dir"
+      "$@"
+    ' bash "$dir" "$@"
+}
+
+resolve_branch_commit() {
+  local commit
+
+  commit="$(
+    git ls-remote --exit-code "$GVM_REPOSITORY" "refs/heads/$GVM_BRANCH" 2>/dev/null |
+      awk 'NR==1 {print $1}'
+  )"
+
+  [[ "$commit" =~ ^[A-Fa-f0-9]{40}$ ]] || \
+    die "Cannot resolve GVM branch '$GVM_BRANCH' from the official repository."
+
+  printf '%s' "$commit"
+}
+
+download_installer() {
+  local destination="$1"
+  local commit="$2"
+  local url="$GVM_RAW_BASE/$commit/binscripts/gvm-installer"
+
+  curl \
+    --fail \
+    --silent \
+    --show-error \
+    --location \
+    --proto '=https' \
+    --tlsv1.2 \
+    --retry 5 \
+    --retry-all-errors \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+    --max-time "$CURL_MAX_TIME" \
+    --output "$destination" \
+    "$url"
+
+  [[ -s "$destination" ]] || die "Downloaded GVM installer is empty."
+
+  if [[ -n "$GVM_INSTALLER_SHA256" ]]; then
+    local actual
+    actual="$(sha256sum "$destination" | awk '{print $1}')"
+    [[ "${actual,,}" == "${GVM_INSTALLER_SHA256,,}" ]] || \
+      die "GVM installer SHA-256 verification failed."
+    info "GVM installer SHA-256 verified."
+  fi
+
+  chmod 0700 "$destination"
+}
+
+reset_gvm_repository_to_commit() {
+  local commit="$1"
+
+  [[ -d "$GVM_ROOT/.git" ]] || die "GVM installation is missing its .git directory."
+
+  local origin
+  origin="$(git -C "$GVM_ROOT" remote get-url origin 2>/dev/null || true)"
+  case "$origin" in
+    https://github.com/moovweb/gvm|https://github.com/moovweb/gvm.git|git@github.com:moovweb/gvm.git)
+      ;;
+    *)
+      die "Unexpected GVM git origin: ${origin:-missing}"
+      ;;
+  esac
+
+  git -C "$GVM_ROOT" fetch --quiet --prune origin "$GVM_BRANCH"
+  git -C "$GVM_ROOT" reset --quiet --hard "$commit"
+}
+
+run_official_installer() {
+  require_root
+  assert_safe_paths
+
+  [[ ! -e "$GVM_ROOT" ]] || die "$GVM_ROOT already exists. Use repair, update, or reinstall."
+
+  local tmp commit rc
+  tmp="$(mktemp /tmp/gvm-installer.XXXXXX)"
+  commit="$(resolve_branch_commit)"
+
+  info "Using GVM branch '$GVM_BRANCH' at commit $commit"
+
+  download_installer "$tmp" "$commit"
+
+  set +e
+  env -i \
+    HOME="$ROOT_HOME" \
+    USER=root \
+    LOGNAME=root \
+    SHELL=/bin/bash \
+    GVM_NO_UPDATE_PROFILE=1 \
+    GVM_NO_GIT_BAK=1 \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    bash --noprofile --norc "$tmp" "$GVM_BRANCH" "$ROOT_HOME"
+  rc=$?
+  set -e
+
+  rm -f -- "$tmp"
+
+  ((rc == 0)) || die "Official GVM installer failed with exit code $rc."
+  [[ -s "$GVM_ROOT/scripts/gvm" ]] || \
+    die "Installer completed but $GVM_ROOT/scripts/gvm is missing."
+
+  reset_gvm_repository_to_commit "$commit"
+  chown -R root:root "$GVM_ROOT"
+}
+
+normalize_go_version() {
+  local raw="${1:-}"
+  local version
+
+  [[ -n "$raw" ]] || return 1
+
+  if [[ "$raw" == "tip" ]]; then
+    printf 'tip'
+    return 0
+  fi
+
+  if [[ "$raw" == go* ]]; then
+    version="$raw"
+  else
+    version="go$raw"
+  fi
+
+  [[ "$version" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?((beta|rc)[0-9]+)?$ ]] || return 1
+  printf '%s' "$version"
+}
+
+validate_default_go() {
+  local normalized
+  normalized="$(normalize_go_version "$GO_DEFAULT_VERSION")" || \
+    die "Invalid GO_DEFAULT_VERSION: $GO_DEFAULT_VERSION"
+  GO_DEFAULT_VERSION="$normalized"
+}
+
+go_is_installed() {
+  local version="$1"
+  gvm_exec gvm list 2>/dev/null | grep -Fq -- "$version"
+}
+
+install_go_binary_version() {
+  local version="$1"
+
+  if go_is_installed "$version"; then
+    info "$version is already installed."
+    return 0
+  fi
+
+  log "Installing $version from binary distribution"
+  gvm_exec gvm install "$version" -B
+}
+
+ensure_default_go() {
+  install_go_binary_version "$GO_DEFAULT_VERSION"
+  gvm_exec gvm use "$GO_DEFAULT_VERSION" --default >/dev/null
+  info "Default Go runtime: $GO_DEFAULT_VERSION"
+}
+
+install_gvm() {
+  require_root
+  require_ubuntu_2404
+  acquire_lock
+  assert_safe_paths
+
+  log "Installing root-managed GVM"
+  install_dependencies
+
+  if [[ -s "$GVM_ROOT/scripts/gvm" ]]; then
+    info "Existing valid GVM installation detected; preserving it."
+  elif [[ -e "$GVM_ROOT" ]]; then
+    die "Partial/corrupt GVM directory exists at $GVM_ROOT. Run '$0 repair'."
+  else
+    run_official_installer
+  fi
+
+  write_profile_block
+  ensure_default_go
+  self_install
+
+  log "Installation complete"
+  verify_gvm
+}
+
+repair_gvm() {
+  require_root
+  require_ubuntu_2404
+  acquire_lock
+  assert_safe_paths
+
+  local broken=""
+
+  log "Repairing root-managed GVM"
+  install_dependencies
+
+  if [[ ! -s "$GVM_ROOT/scripts/gvm" ]]; then
+    if [[ -e "$GVM_ROOT" ]]; then
+      broken="${GVM_ROOT}.broken-$(date +%Y%m%d-%H%M%S)"
+      warn "Moving incomplete GVM directory aside: $broken"
+      mv -- "$GVM_ROOT" "$broken"
+    fi
+
+    if ! run_official_installer; then
+      if [[ -n "$broken" && ! -e "$GVM_ROOT" && -e "$broken" ]]; then
+        mv -- "$broken" "$GVM_ROOT"
+      fi
+      die "GVM repair failed."
+    fi
+  else
+    info "GVM program files are present."
+  fi
+
+  write_profile_block
+  ensure_default_go
+  self_install
+  verify_gvm
+
+  if [[ -n "$broken" ]]; then
+    warn "Previous incomplete data was preserved at: $broken"
+  fi
+}
+
+update_gvm_repository() {
+  require_gvm
+  [[ -d "$GVM_ROOT/.git" ]] || \
+    die "$GVM_ROOT has no .git directory. Run '$0 reinstall'."
+
+  local origin commit
+  origin="$(git -C "$GVM_ROOT" remote get-url origin 2>/dev/null || true)"
+
+  case "$origin" in
+    https://github.com/moovweb/gvm|https://github.com/moovweb/gvm.git|git@github.com:moovweb/gvm.git)
+      ;;
+    *)
+      die "Unexpected GVM git origin: ${origin:-missing}"
+      ;;
+  esac
+
+  commit="$(resolve_branch_commit)"
+  info "Updating GVM to $GVM_BRANCH @ $commit"
+
+  git -C "$GVM_ROOT" fetch --quiet --prune origin "$GVM_BRANCH"
+  git -C "$GVM_ROOT" reset --quiet --hard "$commit"
+  chown -R root:root "$GVM_ROOT"
+}
+
+update_gvm() {
+  require_root
+  require_ubuntu_2404
+  acquire_lock
+  assert_safe_paths
+  require_gvm
+
+  log "Updating GVM"
+  install_dependencies
+  update_gvm_repository
+  write_profile_block
+  ensure_default_go
+  self_install
+  verify_gvm
+}
+
+reinstall_gvm() {
+  require_root
+  require_ubuntu_2404
+  acquire_lock
+  assert_safe_paths
+
+  if [[ ! -d "$GVM_ROOT" ]]; then
+    warn "GVM is not installed; performing a normal install."
+    install_gvm
+    return 0
+  fi
+
+  local old
+  old="${GVM_ROOT}.reinstall-$(date +%Y%m%d-%H%M%S)"
+
+  log "Reinstalling GVM while preserving Go versions and package sets"
+  install_dependencies
+  remove_profile_block
+
+  mv -- "$GVM_ROOT" "$old"
+
+  if ! run_official_installer; then
+    rm -rf --one-file-system -- "$GVM_ROOT" 2>/dev/null || true
+    mv -- "$old" "$GVM_ROOT"
+    die "Reinstall failed; previous GVM installation was restored."
+  fi
+
+  local item
+  for item in gos pkgsets environments archive; do
+    if [[ -e "$old/$item" ]]; then
+      rm -rf -- "$GVM_ROOT/$item"
+      mv -- "$old/$item" "$GVM_ROOT/"
+    fi
+  done
+
+  rm -rf --one-file-system -- "$old"
+  chown -R root:root "$GVM_ROOT"
+
+  write_profile_block
+  ensure_default_go
+  self_install
+  verify_gvm
+}
+
+delete_gvm() {
+  require_root
+  acquire_lock
+  assert_safe_paths
+
+  log "Removing GVM shell integration"
+  warn "GVM data and installed Go versions are preserved at $GVM_ROOT."
+
+  remove_profile_block
+  info "GVM shell integration removed from $PROFILE_FILE."
+  info "Manager retained: $MANAGER_PATH"
+}
+
+purge_gvm() {
+  require_root
+  acquire_lock
+  assert_safe_paths
+
+  cat <<EOF_PURGE
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+DESTRUCTIVE OPERATION
+
+This permanently deletes:
+  $GVM_ROOT
+
+That includes GVM, all GVM-managed Go versions, package sets, environments,
+and cached/archive state.
+
+The manager binary at $MANAGER_PATH is retained.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+EOF_PURGE
+
+  local confirmation=""
+  read -r -p "Type DELETE-GVM-GO-DATA to continue: " confirmation
+  [[ "$confirmation" == "DELETE-GVM-GO-DATA" ]] || die "Purge cancelled."
+
+  remove_profile_block
+
+  if [[ -e "$GVM_ROOT" ]]; then
+    assert_safe_paths
+    rm -rf --one-file-system -- "$GVM_ROOT"
+  fi
+
+  info "GVM and all GVM-managed Go data permanently deleted."
+  info "Manager retained: $MANAGER_PATH"
+}
+
+status_gvm() {
+  require_root
+  assert_safe_paths
+
+  echo "=== GVM Manager ==="
+  echo "Version:  $MANAGER_VERSION"
+  echo "Manager:  $MANAGER_PATH"
+  echo "Mode:     root-managed"
+  echo "Home:     $ROOT_HOME"
+  echo "GVM root: $GVM_ROOT"
+  echo "Default:  $GO_DEFAULT_VERSION"
+  echo
+
+  if [[ ! -s "$GVM_ROOT/scripts/gvm" ]]; then
+    echo "GVM: NOT INSTALLED"
+    return 0
+  fi
+
+  echo "=== GVM ==="
+  gvm_exec gvm version || true
+
+  echo
+  echo "=== Current Go ==="
+  gvm_exec gvm list | sed -n '/=>/p' || true
+  gvm_exec go version || true
+  gvm_exec go env GOROOT GOPATH || true
+
+  echo
+  echo "=== Installed Go versions ==="
+  gvm_exec gvm list || true
+
+  echo
+  echo "=== Package sets ==="
+  gvm_exec gvm pkgset list || true
+
+  echo
+  echo "=== Profile integration ==="
+  if grep -Fq -- "$PROFILE_BEGIN" "$PROFILE_FILE" 2>/dev/null; then
+    echo "Present in $PROFILE_FILE"
+  else
+    echo "Not present"
+  fi
+
+  echo
+  echo "=== GVM repository ==="
+  if [[ -d "$GVM_ROOT/.git" ]]; then
+    printf 'Origin:  '
+    git -C "$GVM_ROOT" remote get-url origin 2>/dev/null || true
+    printf 'Commit:  '
+    git -C "$GVM_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true
+    git -C "$GVM_ROOT" log -1 --format='Latest:  %h %s' 2>/dev/null || true
+  else
+    echo "No .git directory; reinstall is recommended before future updates."
+  fi
+}
+
+verify_gvm() {
+  require_root
+  assert_safe_paths
+  require_gvm
+
+  grep -Fq -- "$PROFILE_BEGIN" "$PROFILE_FILE" || \
+    die "Managed GVM profile block is missing from $PROFILE_FILE."
+  grep -Fq -- "$PROFILE_END" "$PROFILE_FILE" || \
+    die "Managed GVM profile block is incomplete in $PROFILE_FILE."
+
+  local gvm_version go_version goroot gopath default_line
+  gvm_version="$(gvm_exec gvm version)"
+  go_version="$(gvm_exec go version)"
+  goroot="$(gvm_exec go env GOROOT)"
+  gopath="$(gvm_exec go env GOPATH)"
+  default_line="$(gvm_exec gvm list | sed -n '/=>/p' | head -n1)"
+
+  [[ -n "$gvm_version" ]] || die "GVM version verification failed."
+  [[ "$go_version" == go\ version\ go* ]] || die "Go version verification failed: $go_version"
+  [[ -d "$goroot" ]] || die "GOROOT does not exist: $goroot"
+  [[ -n "$gopath" ]] || die "GOPATH is empty."
+  [[ "$default_line" == *"$GO_DEFAULT_VERSION"* ]] || \
+    die "Configured default Go is not active: expected $GO_DEFAULT_VERSION"
+
+  local tmp
+  tmp="$(mktemp -d /tmp/gvm-verify.XXXXXX)"
+  cat >"$tmp/main.go" <<'EOF_GO'
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("gvm-go-runtime-ok")
+}
+EOF_GO
+
+  if ! gvm_exec_in_dir "$tmp" go run main.go | grep -qx 'gvm-go-runtime-ok'; then
+    rm -rf -- "$tmp"
+    die "Go compile/run verification failed."
+  fi
+  rm -rf -- "$tmp"
+
+  echo "GVM/GO: VERIFIED"
+  echo "Mode:    root-managed"
+  echo "GVM:     $gvm_version"
+  echo "Go:      $go_version"
+  echo "GOROOT:  $goroot"
+  echo "GOPATH:  $gopath"
+}
+
+show_version() {
+  require_root
+  require_gvm
+  gvm_exec gvm version
+}
+
+show_current() {
+  require_root
+  require_gvm
+  gvm_exec gvm list | sed -n '/=>/p'
+  gvm_exec go version
+  gvm_exec go env GOROOT GOPATH
+}
+
+list_go() {
+  require_root
+  require_gvm
+  gvm_exec gvm list
+}
+
+list_all_go() {
+  require_root
+  require_gvm
+  gvm_exec gvm listall
+}
+
+install_go_binary() {
+  require_root
+  acquire_lock
+  require_gvm
+
+  local version
+  version="$(normalize_go_version "${1:-}")" || die "Usage: $0 install-go VERSION"
+
+  install_go_binary_version "$version"
+  info "$version installed."
+}
+
+install_go_source() {
+  require_root
+  acquire_lock
+  require_gvm
+
+  local version
+  version="$(normalize_go_version "${1:-}")" || die "Usage: $0 install-go-source VERSION"
+
+  cat <<EOF_SOURCE
+Source compilation requested for:
+  $version
+
+Routine production provisioning should use the binary command instead:
+  gvm-manager install-go $version
+
+Source builds can require a compatible Go bootstrap compiler.
+EOF_SOURCE
+
+  local answer=""
+  read -r -p "Continue with source compilation? [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || die "Source installation cancelled."
+
+  gvm_exec gvm install "$version"
+}
+
+uninstall_go() {
+  require_root
+  acquire_lock
+  require_gvm
+
+  local version
+  version="$(normalize_go_version "${1:-}")" || die "Usage: $0 uninstall-go VERSION"
+
+  [[ "$version" != "$GO_DEFAULT_VERSION" ]] || \
+    die "Refusing to uninstall configured default Go ($GO_DEFAULT_VERSION). Set another default first."
+
+  local answer=""
+  read -r -p "Uninstall GVM Go version '$version'? [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || die "Go uninstall cancelled."
+
+  gvm_exec gvm uninstall "$version"
+}
+
+use_go() {
+  require_root
+  require_gvm
+
+  local version
+  version="$(normalize_go_version "${1:-}")" || die "Usage: $0 use VERSION"
+
+  go_is_installed "$version" || die "$version is not installed."
+  gvm_exec gvm use "$version"
+  gvm_exec go version
+
+  warn "'use' applies only to this manager invocation. Use 'set-default' for persistent selection."
+}
+
+set_default_go() {
+  require_root
+  acquire_lock
+  require_gvm
+
+  local version
+  version="$(normalize_go_version "${1:-}")" || die "Usage: $0 set-default VERSION"
+
+  install_go_binary_version "$version"
+  gvm_exec gvm use "$version" --default >/dev/null
+  GO_DEFAULT_VERSION="$version"
+
+  info "Default Go version set to: $version"
+}
+
+list_pkgsets() {
+  require_root
+  require_gvm
+  gvm_exec gvm pkgset list
+}
+
+validate_pkgset_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]
+}
+
+pkgset_create() {
+  require_root
+  acquire_lock
+  require_gvm
+
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "Usage: $0 pkgset-create NAME"
+  validate_pkgset_name "$name" || die "Invalid package-set name: $name"
+
+  gvm_exec gvm pkgset create "$name"
+}
+
+pkgset_use() {
+  require_root
+  require_gvm
+
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "Usage: $0 pkgset-use NAME"
+  validate_pkgset_name "$name" || die "Invalid package-set name: $name"
+
+  gvm_exec gvm pkgset use "$name"
+  warn "'pkgset-use' applies only to this manager invocation."
+}
+
+pkgset_delete() {
+  require_root
+  acquire_lock
+  require_gvm
+
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "Usage: $0 pkgset-delete NAME"
+  validate_pkgset_name "$name" || die "Invalid package-set name: $name"
+
+  local answer=""
+  read -r -p "Delete GVM package set '$name'? [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || die "Package-set deletion cancelled."
+
+  gvm_exec gvm pkgset delete "$name"
+}
+
+show_env() {
+  require_root
+  require_gvm
+
+  printf 'GVM_ROOT=%s\n' "$GVM_ROOT"
+  printf 'GOROOT=%s\n' "$(gvm_exec go env GOROOT)"
+  printf 'GOPATH=%s\n' "$(gvm_exec go env GOPATH)"
+  printf 'GO_VERSION=%s\n' "$(gvm_exec go version)"
+}
+
+help_text() {
+  cat <<EOF_HELP
+SIMHA GVM / Go Version Manager v$MANAGER_VERSION
+
+Usage:
+  sudo gvm-manager <command> [arguments]
+  sudo bash gvm-manager <command> [arguments]
+
+Lifecycle:
+  install       Install/complete root-managed GVM and default Go.
+  repair        Repair an incomplete GVM installation without deleting valid data.
+  update        Update GVM from the configured upstream branch and verify Go.
+  reinstall     Replace GVM program files while preserving Go versions/pkgsets.
+  delete        Remove only /root shell integration; preserve all GVM/Go data.
+  purge         Permanently delete /root/.gvm and all GVM-managed Go data.
+
+Inspection:
+  status | verify | version | current | list | listall | env
+
+Go versions:
+  install-go VERSION
+  install-go-source VERSION
+  uninstall-go VERSION
+  use VERSION
+  set-default VERSION
+
+Package sets:
+  pkgsets
+  pkgset-create NAME
+  pkgset-use NAME
+  pkgset-delete NAME
+
+Defaults:
+  Mode:        root-managed only
+  GVM branch:  $GVM_BRANCH
+  Default Go:  $GO_DEFAULT_VERSION
+  GVM root:    $GVM_ROOT
+  Profile:     $PROFILE_FILE
+  Manager:     $MANAGER_PATH
+
+Examples:
+  sudo bash gvm-manager install
+  sudo gvm-manager verify
+  sudo gvm-manager status
+  sudo gvm-manager list
+  sudo gvm-manager install-go 1.26.6
+  sudo gvm-manager set-default 1.26.6
+  sudo gvm-manager pkgset-create production
+
+Security / performance behavior:
+  - No mapped Linux user or per-user dispatch layer.
+  - No eval-based GVM command execution.
+  - No curl-to-shell pipeline; installer is downloaded to a private temp file.
+  - Installer is fetched from a resolved upstream git commit over HTTPS.
+  - Optional GVM_INSTALLER_SHA256 can pin/verify installer content.
+  - Git origin is validated before reset/update operations.
+  - Mutating operations use a global flock to prevent concurrent corruption.
+  - APT runs only when required packages are missing.
+  - Routine Go installation uses GVM -B (binary-only).
+  - Reinstall moves preserved GVM data instead of copying it when possible.
+  - Destructive deletion is restricted to the fixed /root/.gvm path.
+
+Environment overrides:
+  GVM_BRANCH=master
+  GO_DEFAULT_VERSION=go1.26.6
+  APT_LOCK_TIMEOUT=600
+  CURL_CONNECT_TIMEOUT=10
+  CURL_MAX_TIME=180
+  GVM_INSTALLER_SHA256=<optional 64-char sha256>
+EOF_HELP
+}
+
+main() {
+  require_root
+  validate_runtime_settings
+  validate_default_go
+  assert_safe_paths
+
+  local command="${1:-help}"
+
+  case "$command" in
+    install)
+      install_gvm
+      ;;
+    repair)
+      repair_gvm
+      ;;
+    update)
+      update_gvm
+      ;;
+    reinstall)
+      reinstall_gvm
+      ;;
+    delete|remove|uninstall)
+      delete_gvm
+      ;;
+    purge)
+      purge_gvm
+      ;;
+    status)
+      status_gvm
+      ;;
+    verify)
+      verify_gvm
+      ;;
+    version)
+      show_version
+      ;;
+    current)
+      show_current
+      ;;
+    list)
+      list_go
+      ;;
+    listall)
+      list_all_go
+      ;;
+    install-go)
+      shift
+      install_go_binary "${1:-}"
+      ;;
+    install-go-source)
+      shift
+      install_go_source "${1:-}"
+      ;;
+    uninstall-go)
+      shift
+      uninstall_go "${1:-}"
+      ;;
+    use)
+      shift
+      use_go "${1:-}"
+      ;;
+    set-default)
+      shift
+      set_default_go "${1:-}"
+      ;;
+    pkgsets)
+      list_pkgsets
+      ;;
+    pkgset-create)
+      shift
+      pkgset_create "${1:-}"
+      ;;
+    pkgset-use)
+      shift
+      pkgset_use "${1:-}"
+      ;;
+    pkgset-delete)
+      shift
+      pkgset_delete "${1:-}"
+      ;;
+    env)
+      show_env
+      ;;
+    help|-h|--help)
+      help_text
+      ;;
+    *)
+      help_text
+      echo
+      die "Unknown command: $command"
+      ;;
+  esac
+}
+
+main "$@"
