@@ -5,7 +5,7 @@ umask 027
 
 # =============================================================================
 # hermes-manager
-# Version: 1.0.1
+# Version: 1.0.0
 # Target: Ubuntu 24.04 LTS
 #
 # Production lifecycle manager for Nous Research Hermes Agent:
@@ -32,7 +32,7 @@ umask 027
 #   - Web + PTY extras are installed explicitly for the dashboard + Chat tab.
 # =============================================================================
 
-readonly HERMES_MANAGER_VERSION="1.0.1"
+readonly HERMES_MANAGER_VERSION="1.0.0"
 readonly HERMES_MANAGER_PATH="/usr/local/bin/hermes-manager"
 readonly HERMES_LOCK_FILE="/run/lock/hermes-manager.lock"
 

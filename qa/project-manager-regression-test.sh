@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-readonly AIOPS_SCRIPT_VERSION="1.0.1"
+readonly AIOPS_SCRIPT_VERSION="1.0.0"
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077

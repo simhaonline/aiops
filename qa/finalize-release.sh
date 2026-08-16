@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-readonly AIOPS_SCRIPT_VERSION="1.0.1"
+readonly AIOPS_SCRIPT_VERSION="1.0.0"
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
@@ -27,7 +27,7 @@ from pathlib import Path
 import hashlib, json
 
 root=Path(".")
-release="1.0.1"
+release="1.0.0"
 
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()

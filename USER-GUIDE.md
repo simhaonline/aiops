@@ -1,6 +1,6 @@
 # SIMHA AiOps User Operations Guide
 
-Release `1.0.1`
+Release `1.0.0`
 
 This guide is for developers using an administrator-provisioned SIMHA AiOps
 host. It covers daily work inside isolated project environments. Host, Forgejo,

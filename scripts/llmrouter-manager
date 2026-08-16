@@ -7,7 +7,7 @@ umask 027
 # Ubuntu 24.04 LTS
 # LMRouter/lmrouter local API router via @lmrouter/cli and localhost-only systemd service.
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly MANAGER_PATH="/usr/local/bin/llmrouter-manager"
 readonly LOCK_FILE="/run/lock/llmrouter-manager.lock"
 

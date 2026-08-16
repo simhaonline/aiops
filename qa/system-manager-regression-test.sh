@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-readonly AIOPS_SCRIPT_VERSION="1.0.1"
+readonly AIOPS_SCRIPT_VERSION="1.0.0"
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -37,7 +37,7 @@ grep -Fq 'No automatic reboot' "$SCRIPT"
 
 bash -n "$SCRIPT"
 "$SCRIPT" help >/dev/null
-"$SCRIPT" version | grep -Fq 'system-manager 1.0.1'
+"$SCRIPT" version | grep -Fq 'system-manager 1.0.0'
 
 # Exact regression for the default sysadmin account:
 # the manager owns a sysadmin group, so a new sysadmin user must reuse that

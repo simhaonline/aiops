@@ -5,7 +5,7 @@ umask 027
 
 # =============================================================================
 # Ollama Cloud Manager - Ubuntu 24.04
-# Manager version: 1.0.1
+# Manager version: 1.0.0
 #
 # Purpose:
 #   Cloud-only Ollama operation. Model inference runs on Ollama Cloud.
@@ -36,7 +36,7 @@ umask 027
 #   config | help
 # =============================================================================
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly MANAGER_PATH="/usr/local/bin/ollama-manager"
 readonly CONFIG_DIR="/etc/ollama-cloud"
 readonly CONFIG_FILE="${CONFIG_DIR}/ollama.env"

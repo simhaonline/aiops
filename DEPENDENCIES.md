@@ -1,4 +1,4 @@
-# Dependency Map - SIMHA AiOps 1.0.1
+# Dependency Map - SIMHA AiOps 1.0.0
 
 ## Host requirement
 

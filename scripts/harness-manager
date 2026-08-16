@@ -5,7 +5,7 @@ umask 027
 
 # =============================================================================
 # DeepSeek Harness Manager
-# Version: 1.0.1
+# Version: 1.0.0
 # Target: Ubuntu 24.04 LTS
 #
 # Clean-server design:
@@ -28,7 +28,7 @@ umask 027
 #   Harness/Nginx server: 152.53.67.111
 # =============================================================================
 
-readonly HM_VERSION="1.0.1"
+readonly HM_VERSION="1.0.0"
 readonly HM_MANAGER_PATH="/usr/local/bin/harness-manager"
 readonly HM_LOCK_FILE="/run/lock/harness-manager.lock"
 

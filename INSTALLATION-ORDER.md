@@ -1,4 +1,4 @@
-# Installation Order - SIMHA AiOps 1.0.1
+# Installation Order - SIMHA AiOps 1.0.0
 
 ## Step 0 - Install manager commands
 

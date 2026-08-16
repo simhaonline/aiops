@@ -5,7 +5,7 @@ umask 022
 
 # =============================================================================
 # NVM / Node.js / PM2 Manager for Ubuntu 24.04 LTS
-# Manager version: 1.0.1
+# Manager version: 1.0.0
 #
 # Clean per-user lifecycle manager. No dedicated service account is required.
 # Default target user: root
@@ -26,7 +26,7 @@ umask 022
 #   /usr/local/bin/nvm-manager
 # =============================================================================
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly MANAGER_PATH="/usr/local/bin/nvm-manager"
 readonly NVM_REPOSITORY="https://github.com/nvm-sh/nvm.git"
 readonly PROFILE_BEGIN="# >>> NVM MANAGER BLOCK >>>"

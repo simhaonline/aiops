@@ -7,7 +7,7 @@ umask 027
 # Ubuntu 24.04 LTS
 # Anthropic Claude Code using the official signed APT repository.
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly MANAGER_PATH="/usr/local/bin/claude-manager"
 readonly LOCK_FILE="/run/lock/claude-manager.lock"
 

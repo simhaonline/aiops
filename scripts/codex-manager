@@ -3,11 +3,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
-# codex-manager v1.0.1
+# codex-manager v1.0.0
 # Ubuntu 24.04 LTS
 # OpenAI Codex CLI + optional localhost App Server lifecycle.
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly MANAGER_PATH="/usr/local/bin/codex-manager"
 readonly LOCK_FILE="/run/lock/codex-manager.lock"
 

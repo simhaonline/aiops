@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # WireGuard Manager for Ubuntu 24.04 LTS
-# Manager version: 1.0.1
+# Manager version: 1.0.0
 #
 # One script for:
 #   - Install WireGuard
@@ -23,7 +23,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-MANAGER_VERSION="1.0.1"
+MANAGER_VERSION="1.0.0"
 WG_INTERFACE="wg0"
 WG_PORT="1320"
 WG_DIR="/etc/wireguard"

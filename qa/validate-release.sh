@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-readonly AIOPS_SCRIPT_VERSION="1.0.1"
+readonly AIOPS_SCRIPT_VERSION="1.0.0"
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
 cd "$(dirname "$0")/.."
 
-readonly RELEASE_VERSION="1.0.1"
+readonly RELEASE_VERSION="1.0.0"
 readonly EXPECTED_MANAGERS=20
 
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
@@ -53,22 +53,22 @@ pass "Manager help smoke tests"
 for name in scripts/*; do
   base="$(basename "$name")"
   case "$base" in
-    system-manager) grep -Fq 'readonly SYSTEM_MANAGER_VERSION="1.0.1"' "$name" ;;
-    harness-manager) grep -Fq 'readonly HM_VERSION="1.0.1"' "$name" ;;
-    hermes-manager) grep -Fq 'readonly HERMES_MANAGER_VERSION="1.0.1"' "$name" ;;
-    nginx-manager) grep -Fq 'readonly NGM_VERSION="1.0.1"' "$name" ;;
-    manager-suite) grep -Fq 'readonly SUITE_VERSION="1.0.1"' "$name" ;;
-    *) grep -Eq '(^readonly )?MANAGER_VERSION="1\.0\.1"$' "$name" ;;
-  esac || die "$base is not manager release 1.0.1."
+    system-manager) grep -Fq 'readonly SYSTEM_MANAGER_VERSION="1.0.0"' "$name" ;;
+    harness-manager) grep -Fq 'readonly HM_VERSION="1.0.0"' "$name" ;;
+    hermes-manager) grep -Fq 'readonly HERMES_MANAGER_VERSION="1.0.0"' "$name" ;;
+    nginx-manager) grep -Fq 'readonly NGM_VERSION="1.0.0"' "$name" ;;
+    manager-suite) grep -Fq 'readonly SUITE_VERSION="1.0.0"' "$name" ;;
+    *) grep -Eq '(^readonly )?MANAGER_VERSION="1\.0\.0"$' "$name" ;;
+  esac || die "$base is not manager release 1.0.0."
 done
-pass "Unified maintained-manager version 1.0.1"
+pass "Unified maintained-manager version 1.0.0"
 
-grep -Fq 'readonly INSTALLER_VERSION="1.0.1"' install.sh || die "install.sh version mismatch."
-grep -Fq 'readonly INSTALLER_VERSION="1.0.1"' install-canonical-managers.sh || die "canonical installer version mismatch."
+grep -Fq 'readonly INSTALLER_VERSION="1.0.0"' install.sh || die "install.sh version mismatch."
+grep -Fq 'readonly INSTALLER_VERSION="1.0.0"' install-canonical-managers.sh || die "canonical installer version mismatch."
 for f in qa/*.sh; do
-  grep -Fq 'readonly AIOPS_SCRIPT_VERSION="1.0.1"' "$f" || die "QA script version mismatch: $f"
+  grep -Fq 'readonly AIOPS_SCRIPT_VERSION="1.0.0"' "$f" || die "QA script version mismatch: $f"
 done
-pass "Release helper versions 1.0.1"
+pass "Release helper versions 1.0.0"
 
 # Dependency and installation-order consistency.
 grep -Fq 'REQUIRES nvm-manager AND ollama-manager' scripts/manager-suite || \
@@ -135,7 +135,7 @@ import hashlib, json
 
 root=Path(".")
 m=json.loads((root/"MANIFEST.json").read_text())
-assert m["release"]=="1.0.1"
+assert m["release"]=="1.0.0"
 assert len(m["managers"])==20
 
 def sha(p):
@@ -144,7 +144,7 @@ def sha(p):
 for name, meta in m["managers"].items():
     p=root/"scripts"/name
     assert p.is_file(), name
-    assert meta["version"]=="1.0.1", name
+    assert meta["version"]=="1.0.0", name
     assert meta["sha256"]==sha(p), name
     assert meta["size_bytes"]==p.stat().st_size, name
 

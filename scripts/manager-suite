@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly SUITE_VERSION="1.0.1"
+readonly SUITE_VERSION="1.0.0"
 readonly MANAGERS=(
   system-manager
   docker-manager

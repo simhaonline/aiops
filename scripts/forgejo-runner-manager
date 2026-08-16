@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly RUNNER_USER="forgejo-runner"
 readonly RUNNER_HOME="/var/lib/forgejo-runner"
 readonly RUNNER_BIN="/usr/local/bin/forgejo-runner"

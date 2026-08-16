@@ -1,4 +1,4 @@
-# Security Policy - SIMHA AiOps 1.0.1
+# Security Policy - SIMHA AiOps 1.0.0
 
 ## Supported platform
 

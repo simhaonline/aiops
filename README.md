@@ -1,6 +1,6 @@
 # SIMHA AiOps Manager Suite
 
-**Release:** `1.0.1`  
+**Release:** `1.0.0`
 **Target OS:** Ubuntu Server 24.04 LTS  
 **Repository:** `simhaonline/aiops`
 
@@ -46,8 +46,8 @@ That separation is intentional: installing manager commands is low risk; runtime
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/simhaonline/aiops/v1.0.1/install.sh \
-  | AIOPS_REF=v1.0.1 AIOPS_REQUIRE_PIN=1 bash
+  https://raw.githubusercontent.com/simhaonline/aiops/v1.0.0/install.sh \
+  | AIOPS_REF=v1.0.0 AIOPS_REQUIRE_PIN=1 bash
 ```
 
 You can also perform a download/verification-only bootstrap test:
@@ -61,28 +61,28 @@ curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh \
 
 | Manager | Version | Purpose | Primary dependency |
 |---|---:|---|---|
-| `system-manager` | 1.0.1 | Ubuntu base security/packages/SSH/UFW/limits/time | Ubuntu 24.04 |
-| `docker-manager` | 1.0.1 | Host Docker + managed rootless Docker | system baseline recommended |
-| `forgejo-manager` | 1.0.1 | Rootless Forgejo + PostgreSQL, backup and restore | **requires rootless Docker** |
-| `forgejo-runner-manager` | 1.0.1 | Dedicated rootless Podman Actions runner | separate VM recommended |
-| `gvm-manager` | 1.0.1 | Root-scoped GVM/Go | system baseline recommended |
-| `miniconda-manager` | 1.0.1 | System-wide Miniconda | system baseline recommended |
-| `nvm-manager` | 1.0.1 | Root NVM/Node/PM2 | system baseline recommended |
-| `ollama-manager` | 1.0.1 | Ollama Cloud/local loopback API policy | system baseline recommended |
-| `nginx-manager` | 1.0.1 | Nginx/Certbot reverse proxy and TLS | system baseline recommended |
-| `wireguard-manager` | 1.0.1 | WireGuard VPN | system baseline recommended |
-| `harness-manager` | 1.0.1 | DeepSeek Harness CLI/Web service | **requires `nvm-manager` and `ollama-manager`** |
-| `hermes-manager` | 1.0.1 | Hermes CLI + loopback Dashboard | system build packages |
-| `codex-manager` | 1.0.1 | OpenAI Codex CLI/App Server lifecycle | system base utilities |
-| `claude-manager` | 1.0.1 | Claude Code lifecycle | system base utilities |
-| `opencode-manager` | 1.0.1 | OpenCode CLI/server lifecycle | **requires `nvm-manager`** |
-| `freebuff-manager` | 1.0.1 | Freebuff CLI lifecycle | **requires `nvm-manager`** |
-| `litellm-manager` | 1.0.1 | LiteLLM Proxy lifecycle | Python/venv/build baseline |
-| `llmrouter-manager` | 1.0.1 | LMRouter CLI/API lifecycle | **requires `nvm-manager`** |
-| `project-manager` | 1.0.1 | Isolated per-project development, backup and restore | **requires Docker Compose** |
-| `manager-suite` | 1.0.1 | Cross-manager inventory/status/verification | none |
+| `system-manager` | 1.0.0 | Ubuntu base security/packages/SSH/UFW/limits/time | Ubuntu 24.04 |
+| `docker-manager` | 1.0.0 | Host Docker + managed rootless Docker | system baseline recommended |
+| `forgejo-manager` | 1.0.0 | Rootless Forgejo + PostgreSQL, backup and restore | **requires rootless Docker** |
+| `forgejo-runner-manager` | 1.0.0 | Dedicated rootless Podman Actions runner | separate VM recommended |
+| `gvm-manager` | 1.0.0 | Root-scoped GVM/Go | system baseline recommended |
+| `miniconda-manager` | 1.0.0 | System-wide Miniconda | system baseline recommended |
+| `nvm-manager` | 1.0.0 | Root NVM/Node/PM2 | system baseline recommended |
+| `ollama-manager` | 1.0.0 | Ollama Cloud/local loopback API policy | system baseline recommended |
+| `nginx-manager` | 1.0.0 | Nginx/Certbot reverse proxy and TLS | system baseline recommended |
+| `wireguard-manager` | 1.0.0 | WireGuard VPN | system baseline recommended |
+| `harness-manager` | 1.0.0 | DeepSeek Harness CLI/Web service | **requires `nvm-manager` and `ollama-manager`** |
+| `hermes-manager` | 1.0.0 | Hermes CLI + loopback Dashboard | system build packages |
+| `codex-manager` | 1.0.0 | OpenAI Codex CLI/App Server lifecycle | system base utilities |
+| `claude-manager` | 1.0.0 | Claude Code lifecycle | system base utilities |
+| `opencode-manager` | 1.0.0 | OpenCode CLI/server lifecycle | **requires `nvm-manager`** |
+| `freebuff-manager` | 1.0.0 | Freebuff CLI lifecycle | **requires `nvm-manager`** |
+| `litellm-manager` | 1.0.0 | LiteLLM Proxy lifecycle | Python/venv/build baseline |
+| `llmrouter-manager` | 1.0.0 | LMRouter CLI/API lifecycle | **requires `nvm-manager`** |
+| `project-manager` | 1.0.0 | Isolated per-project development, backup and restore | **requires Docker Compose** |
+| `manager-suite` | 1.0.0 | Cross-manager inventory/status/verification | none |
 
-Runtime/upstream application versions are independent from the manager suite version. For example, `nvm-manager 1.0.1` can manage a newer Node release without changing the manager's own version.
+Runtime/upstream application versions are independent from the manager suite version. For example, `nvm-manager 1.0.0` can manage a newer Node release without changing the manager's own version.
 
 ## Recommended runtime installation sequence
 
@@ -371,7 +371,7 @@ bash qa/validate-release.sh
 The release gate checks:
 
 - exactly 20 maintained manager scripts;
-- all maintained managers are version `1.0.1`;
+- all maintained managers are version `1.0.0`;
 - Bash syntax;
 - manager `help` entry points;
 - canonical installer `--check`;
@@ -399,7 +399,7 @@ The bootstrap installs lifecycle **management commands**. Each runtime remains a
 
 ---
 
-SIMHA AiOps Manager Suite `1.0.1`
+SIMHA AiOps Manager Suite `1.0.0`
 
 
 ## Freebuff first-run runtime

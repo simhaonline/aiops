@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly ROOTLESS_USER="${FORGEJO_DOCKER_USER:-docker-rootless}"
 readonly STACK_DIR="${FORGEJO_STACK_DIR:-/var/lib/docker-rootless/forgejo-stack}"
 readonly COMPOSE_FILE="$STACK_DIR/compose.yaml"

@@ -1,6 +1,6 @@
 # SIMHA AiOps Administrator Operations Guide
 
-Release `1.0.1` · Ubuntu Server 24.04 LTS
+Release `1.0.0` · Ubuntu Server 24.04 LTS
 
 This guide is for administrators responsible for the host, shared services,
 isolated project environments, source control, CI runners, security, backup,

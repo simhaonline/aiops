@@ -1,8 +1,8 @@
-# Release Notes - 1.0.1
+# Release Notes - 1.0.0
 
 ## Final unified release
 
-All maintained executable manager scripts now use manager version `1.0.1`.
+All maintained executable manager scripts now use manager version `1.0.0`.
 
 ### Installer
 
@@ -26,7 +26,7 @@ All maintained executable manager scripts now use manager version `1.0.1`.
 
 ### Suite
 
-- `manager-suite` standardized to version `1.0.1`.
+- `manager-suite` standardized to version `1.0.0`.
 - Added `install-order`.
 - Added `dependencies`.
 - Retains non-strict `verify` and strict `verify-all`.

@@ -1,105 +1,105 @@
 {
-  "release": "1.0.1",
+  "release": "1.0.0",
   "target_os": "Ubuntu 24.04 LTS",
   "managers": {
     "claude-manager": {
-      "version": "1.0.1",
-      "sha256": "22bd68eee73fa90d60d905c846ac6332a6bd257d04c7d8f28245fcbcdd274e6d",
+      "version": "1.0.0",
+      "sha256": "a0a78f6db258264595d9be18e902c2c5ec66c65368e589cb620be1257533285e",
       "size_bytes": 5694
     },
     "codex-manager": {
-      "version": "1.0.1",
-      "sha256": "2f6833a5b94e43a8378955dbe45654ab3224f8a50a0cae234a63c0368529e438",
+      "version": "1.0.0",
+      "sha256": "0f571e8364963a49db96d4c55a4d9ba065e77729c320ca7610896781ac089330",
       "size_bytes": 9361
     },
     "docker-manager": {
-      "version": "1.0.1",
-      "sha256": "370d1a38f8846980979479e3b72c43cca7f5be0cff26569409581c8f7f909ccb",
+      "version": "1.0.0",
+      "sha256": "a850e9a6a89801e8363d64e10c8c7c9e03825c704614d8d4b7323840ecc935c6",
       "size_bytes": 36725
     },
     "forgejo-manager": {
-      "version": "1.0.1",
-      "sha256": "7996619d0faeb7b3607a93f6e8a6816d1bc40971ff09a8abdf287bbc50278c79",
+      "version": "1.0.0",
+      "sha256": "005dd4f539edb089cc8b9d252b8cc5d654f3421109ba3eaf5538a7c364f5f759",
       "size_bytes": 8900
     },
     "forgejo-runner-manager": {
-      "version": "1.0.1",
-      "sha256": "dc7f67ff24e309cb5e9c72e796225d4ecfeec6066d87d777a1bc1caf961ac186",
+      "version": "1.0.0",
+      "sha256": "00af4f95a83e02650c03fabae8aa8082a5f93c93b3a3349086ec38b8f415e49d",
       "size_bytes": 7954
     },
     "freebuff-manager": {
-      "version": "1.0.1",
-      "sha256": "b27163115f252110efa1a7726cc112046cb73183d064b247d5d60cf05c64e2b8",
+      "version": "1.0.0",
+      "sha256": "5a5d02de2c6a627eb7fd4ed3b83d7c8683abf5ee9c19fecd5964c3feaf176b3f",
       "size_bytes": 8549
     },
     "gvm-manager": {
-      "version": "1.0.1",
-      "sha256": "5004f598718cb99f475b07cadc220451e7d60cbc09e2e595782e9325e61d432c",
+      "version": "1.0.0",
+      "sha256": "0830b34e3bde66463680bdb22da342f8922fcccc42cbe7481d1f397e372374b9",
       "size_bytes": 27153
     },
     "harness-manager": {
-      "version": "1.0.1",
-      "sha256": "731fe07f74175c47969f2cdb1995b46ef22491876f5777aea73e4fab9d74d578",
+      "version": "1.0.0",
+      "sha256": "2951d309fa3e273782b20a02002d412f60080ca426f132dcef2e380b876c4f63",
       "size_bytes": 67926
     },
     "hermes-manager": {
-      "version": "1.0.1",
-      "sha256": "f5bc109cd52fea0d03003eae9458fad1482b662e8c7625b655ab5cc868020268",
+      "version": "1.0.0",
+      "sha256": "a9b383a16eee4e23dd7a852f577768b84bb794afef2ec5d7d33f2dc4d51d1333",
       "size_bytes": 37224
     },
     "litellm-manager": {
-      "version": "1.0.1",
-      "sha256": "1dda363d2517cfaab1a959c3fb286603a2989e1380fa27a34aa611222206e8b4",
+      "version": "1.0.0",
+      "sha256": "d637040998b5df8d2d3f7698002762d81ad261bd59726564a133592130bee66d",
       "size_bytes": 9515
     },
     "llmrouter-manager": {
-      "version": "1.0.1",
-      "sha256": "f37076e01ba618343b4e9550b4bd915eaa7ffbbf8eb73bb69a5968d21caaf35d",
+      "version": "1.0.0",
+      "sha256": "74f372b6ccf358b7e3c1473ef8514d965f9ca3badd827eb3ac338628ac4a861c",
       "size_bytes": 8593
     },
     "manager-suite": {
-      "version": "1.0.1",
-      "sha256": "7e480dc155d2c24f8f36fb2ce94685c7119b6ebdf8fd225cd93e751f704f5330",
+      "version": "1.0.0",
+      "sha256": "060c3667969545c2895a1c844e405dd0fc74064442f33749de51d031108f90aa",
       "size_bytes": 7049
     },
     "miniconda-manager": {
-      "version": "1.0.1",
-      "sha256": "de4f9f810ec0441ae8d5b79b29b2d00d7145e541c53dc6b7af1a17f98c25852a",
+      "version": "1.0.0",
+      "sha256": "7160c344b2c655159ab9108c0c938da4a88e2dd4a73f36beb75b75142156b12e",
       "size_bytes": 44354
     },
     "nginx-manager": {
-      "version": "1.0.1",
-      "sha256": "17a09dbb009cf6651915b25a84f5b35c6da5229442ab70e234eafb3eeaf778a6",
+      "version": "1.0.0",
+      "sha256": "d6660b2a84507d7818a024dfbdb1a0c5843671bbc7ba5f2072056ab47f9ee54f",
       "size_bytes": 61377
     },
     "nvm-manager": {
-      "version": "1.0.1",
-      "sha256": "4dc80ab0b2398a43d880739216c4eea1a3e552f31d50e0f6a50a127b07ed8c48",
+      "version": "1.0.0",
+      "sha256": "8abfe85e8d953629076ae8e927be623e29fe83656c60984bc832b883a60f4a20",
       "size_bytes": 22470
     },
     "ollama-manager": {
-      "version": "1.0.1",
-      "sha256": "74c7a4ecb5f8cee4e84341326618c51b31e28d07a5c34a2edbcdb6a065c21d5d",
+      "version": "1.0.0",
+      "sha256": "441912b9b97b95d4c9264bf815ca0895262285298e2d248f499a664be37d54b7",
       "size_bytes": 30556
     },
     "opencode-manager": {
-      "version": "1.0.1",
-      "sha256": "d6ab11af4c1747f14f004f268f1254c9da7c27767b411ed0004b8830dc5f74d9",
+      "version": "1.0.0",
+      "sha256": "7e906e63d0805f6f4d736f6a52a4ef8dbface12970243328c4359beaae8fc106",
       "size_bytes": 7747
     },
     "project-manager": {
-      "version": "1.0.1",
-      "sha256": "08bd4c87e5ed772fc0805a92bec9fbf8aba5f621b229a93f0750510552edd1a1",
+      "version": "1.0.0",
+      "sha256": "ce7f6336b1cb7a3114e6cfd8a349c8178d49116049f8cbd67568ae0eb28834d5",
       "size_bytes": 16878
     },
     "system-manager": {
-      "version": "1.0.1",
-      "sha256": "ae22a908a19a23ef0539190f27da791a95f0650a7b782cea8a410e40dc014d36",
+      "version": "1.0.0",
+      "sha256": "76c072c0aab86fee787fe710f7f6aea5ea772db8e8fd70bc5b1d2b4ef58a894f",
       "size_bytes": 33491
     },
     "wireguard-manager": {
-      "version": "1.0.1",
-      "sha256": "e375b84d74f23d00e5e490b0cfabe993f01cf722e974b0a9352b25b625595528",
+      "version": "1.0.0",
+      "sha256": "f98b706c98c7eba0d316439e628d2b49ac721f37d60c81fd6890253f05bad91b",
       "size_bytes": 31059
     }
   },

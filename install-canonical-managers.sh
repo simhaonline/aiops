@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-readonly INSTALLER_VERSION="1.0.1"
+readonly INSTALLER_VERSION="1.0.0"
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
-readonly RELEASE_VERSION="1.0.1"
+readonly RELEASE_VERSION="1.0.0"
 
 readonly MANAGERS=(
   system-manager
@@ -78,13 +78,13 @@ known_manager(){
 verify_version(){
   local name="$1" file="${SRC}/$1"
   case "$name" in
-    system-manager) grep -Fq 'readonly SYSTEM_MANAGER_VERSION="1.0.1"' "$file" ;;
-    harness-manager) grep -Fq 'readonly HM_VERSION="1.0.1"' "$file" ;;
-    hermes-manager) grep -Fq 'readonly HERMES_MANAGER_VERSION="1.0.1"' "$file" ;;
-    nginx-manager) grep -Fq 'readonly NGM_VERSION="1.0.1"' "$file" ;;
-    manager-suite) grep -Fq 'readonly SUITE_VERSION="1.0.1"' "$file" ;;
-    *) grep -Eq '(^readonly )?MANAGER_VERSION="1\.0\.1"$' "$file" ;;
-  esac || die "$name is not release version 1.0.1."
+    system-manager) grep -Fq 'readonly SYSTEM_MANAGER_VERSION="1.0.0"' "$file" ;;
+    harness-manager) grep -Fq 'readonly HM_VERSION="1.0.0"' "$file" ;;
+    hermes-manager) grep -Fq 'readonly HERMES_MANAGER_VERSION="1.0.0"' "$file" ;;
+    nginx-manager) grep -Fq 'readonly NGM_VERSION="1.0.0"' "$file" ;;
+    manager-suite) grep -Fq 'readonly SUITE_VERSION="1.0.0"' "$file" ;;
+    *) grep -Eq '(^readonly )?MANAGER_VERSION="1\.0\.0"$' "$file" ;;
+  esac || die "$name is not release version 1.0.0."
 }
 
 verify_source(){

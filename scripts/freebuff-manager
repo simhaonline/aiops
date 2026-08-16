@@ -3,11 +3,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
-# freebuff-manager v1.0.1
+# freebuff-manager v1.0.0
 # Ubuntu 24.04 LTS
 # Freebuff CLI lifecycle through the existing root-scoped nvm-manager.
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly MANAGER_PATH="/usr/local/bin/freebuff-manager"
 readonly LOCK_FILE="/run/lock/freebuff-manager.lock"
 

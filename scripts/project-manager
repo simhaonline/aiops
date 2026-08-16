@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-readonly MANAGER_VERSION="1.0.1"
+readonly MANAGER_VERSION="1.0.0"
 readonly MANAGED_DIR=".aiops"
 readonly COMPOSE_REL="${MANAGED_DIR}/compose.yaml"
 readonly ENV_REL="${MANAGED_DIR}/project.env"
