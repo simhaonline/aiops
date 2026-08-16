@@ -1,42 +1,71 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowIcon, BoxIcon, GridIcon, LayersIcon, PulseIcon, SearchIcon, ShieldIcon } from "./icons";
 import { ThemeToggle } from "./theme-toggle";
 
-type Overview = { host: string; uptime: string; load: number; memory: number; managers: {name:string; state:string; detail:string}[]; projects: {name:string; status:string; services:number; health:string; updated:string}[] };
-const fallback: Overview = {host:"aiops-primary",uptime:"—",load:0,memory:0,managers:[{name:"Nginx edge",state:"checking",detail:"TLS and proxy"},{name:"Project runtime",state:"checking",detail:"Docker Compose"},{name:"Collection plane",state:"checking",detail:"Scrapling workers"}],projects:[]};
+type Overview={host:string;uptime:string;load:number;memory:number;managers:{name:string;state:string;detail:string}[];projects:{name:string;status:string;services:number;health:string;updated:string}[]};
+type Capability={id:string;label:string;accept:string[];actions:string[]};
+type Workspace={modalities:Capability[];surfaces:string[];registry:{types:string[];states:string[];autoInstall?:boolean};routing:{gateway?:string;policy?:string;costPolicy?:string};safety:{uploads?:string;publicArtifacts?:string;secrets?:string;mutations?:string}};
+const fallback:Overview={host:"aiops-primary",uptime:"—",load:0,memory:0,managers:[],projects:[]};
+const workspaceFallback:Workspace={modalities:[
+  {id:"text",label:"Text",accept:[],actions:["chat","summarize","rewrite"]},{id:"code",label:"Codebase",accept:[],actions:["review","debug","refactor"]},{id:"document",label:"PDF & docs",accept:[],actions:["extract","compare","translate"]},{id:"image",label:"Image",accept:[],actions:["understand","generate","edit"]},{id:"video",label:"Video",accept:[],actions:["transcribe","summarize","chapter"]},{id:"voice",label:"Voice",accept:[],actions:["transcribe","synthesize","conversation"]},{id:"translation",label:"Translation",accept:[],actions:["detect","localize","subtitle"]}
+],surfaces:[],registry:{types:["skill","agent","mcp","plugin"],states:[]},routing:{gateway:"LiteLLM",policy:"capability-aware",costPolicy:"verified-free-first"},safety:{uploads:"quarantine-first",publicArtifacts:"manual-approval"}};
 
-const nav = [{label:"Overview",icon:GridIcon},{label:"Projects",icon:BoxIcon},{label:"Collections",icon:LayersIcon},{label:"Telemetry",icon:PulseIcon},{label:"Security",icon:ShieldIcon}];
+const navigation=[
+  {label:"Studio",icon:GridIcon},{label:"Codebases",icon:BoxIcon},{label:"Knowledge",icon:LayersIcon},{label:"Media",icon:PulseIcon},
+  {label:"Workflows",icon:LayersIcon},{label:"Registry",icon:ShieldIcon},{label:"Projects",icon:BoxIcon},{label:"Operations",icon:PulseIcon}
+];
+const featureCopy:Record<string,{eyebrow:string,title:string,description:string}>= {
+  Codebases:{eyebrow:"Engineering intelligence",title:"Understand and change code with context.",description:"Index repositories, inspect diffs, review architecture, generate tests and route coding work to tool-capable models."},
+  Knowledge:{eyebrow:"Grounded knowledge",title:"Turn every document into usable context.",description:"Ingest PDFs, Office files, Markdown, data and web collections with citations, provenance and project-scoped retrieval."},
+  Media:{eyebrow:"Multimodal production",title:"One workspace for image, video and voice.",description:"Analyze, generate, edit, transcribe, subtitle, translate and publish media through capability-matched models."},
+  Workflows:{eyebrow:"Visual orchestration",title:"Compose reliable agent workflows.",description:"Connect models, approved tools, human approvals, branching, schedules and observability without exposing arbitrary execution."},
+  Registry:{eyebrow:"Capability supply chain",title:"Discover broadly. Publish deliberately.",description:"Quarantine, scan, review and version skills, agents, MCP servers and plugins before they reach a project."},
+  Projects:{eyebrow:"Isolated workspaces",title:"Keep every project in its own boundary.",description:"Give each codebase dedicated instructions, assets, credentials, runtime state and auditable capability assignments."},
+  Operations:{eyebrow:"Control plane",title:"Operate the platform without hidden mutations.",description:"Monitor services, verify managers, review audit history and execute only explicitly allowlisted actions."}
+};
+
 export function DashboardShell(){
-  const [overview,setOverview]=useState(fallback); const [active,setActive]=useState("Overview"); const [now,setNow]=useState("");
-  useEffect(()=>{setNow(new Intl.DateTimeFormat(undefined,{weekday:"long",month:"long",day:"numeric"}).format(new Date())); fetch("/api/overview").then(r=>r.ok?r.json():Promise.reject()).then(setOverview).catch(()=>{});},[]);
-  return <div className="shell">
-    <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><span/></span><div><b>SIMHA</b><small>AiOps control plane</small></div></div>
-      <nav aria-label="Primary">{nav.map(({label,icon:NavIcon})=><button key={label} className={active===label?"nav-item active":"nav-item"} onClick={()=>setActive(label)}><NavIcon/><span>{label}</span>{label==="Security"&&<i>3</i>}</button>)}</nav>
-      <div className="sidebar-foot"><div className="environment"><span className="status-dot"/><div><b>Production</b><small>{overview.host}</small></div></div><button className="profile" aria-label="Account menu">SO</button></div>
+  const [overview,setOverview]=useState(fallback),[workspace,setWorkspace]=useState(workspaceFallback),[active,setActive]=useState("Studio"),[mode,setMode]=useState("text"),[prompt,setPrompt]=useState("");
+  useEffect(()=>{Promise.allSettled([fetch("/api/overview").then(r=>r.ok?r.json():Promise.reject()),fetch("/api/workspace/capabilities").then(r=>r.ok?r.json():Promise.reject())]).then(([o,w])=>{if(o.status==="fulfilled")setOverview(o.value);if(w.status==="fulfilled")setWorkspace(w.value);});},[]);
+  const selected=useMemo(()=>workspace.modalities.find(x=>x.id===mode)??workspace.modalities[0],[workspace,mode]);
+  return <div className="shell studio-shell">
+    <aside className="sidebar studio-sidebar">
+      <div className="brand"><span className="brand-mark"><span/></span><div><b>SIMHA</b><small>Intelligence workspace</small></div></div>
+      <div className="workspace-switch"><span className="avatar-mark">S</span><div><b>Simha Studio</b><small>Production workspace</small></div><span>⌄</span></div>
+      <nav aria-label="Primary">{navigation.map(({label,icon:NavIcon})=><button key={label} className={active===label?"nav-item active":"nav-item"} onClick={()=>setActive(label)}><NavIcon/><span>{label}</span>{label==="Registry"&&<i>Review</i>}</button>)}</nav>
+      <div className="sidebar-section"><span>Quick access</span><button onClick={()=>{setActive("Studio");setMode("code")}}>⌁ Repository review</button><button onClick={()=>{setActive("Studio");setMode("document")}}>⌁ Ask a document</button><button onClick={()=>setActive("Registry")}>⌁ Review queue</button></div>
+      <div className="sidebar-foot"><div className="environment"><span className="status-dot"/><div><b>Gateway online</b><small>{overview.host}</small></div></div><button className="profile" aria-label="Account menu">SO</button></div>
     </aside>
-    <main>
-      <header><div className="mobile-brand">SIMHA AiOps</div><label className="search"><SearchIcon/><input placeholder="Search projects, services, collections" aria-label="Search"/><kbd>⌘ K</kbd></label><div className="header-actions"><span className="live"><i/>Live</span><ThemeToggle/></div></header>
-      <div className="content">
-        <section className="welcome"><div><p>{now}</p><h1>Good operations start with clarity.</h1><span>Infrastructure, agents and collections—one controlled surface.</span></div><button className="primary">Run health check <ArrowIcon/></button></section>
-        <section className="signal-grid">
-          <article className="signal"><div className="signal-head"><span>Platform health</span><i className="health-icon"><PulseIcon/></i></div><strong>Operational</strong><p>All critical controls responding</p><div className="mini-bars">{[38,54,46,66,52,72,61,78,68,82,73,88].map((h,i)=><i key={i} style={{height:`${h}%`}}/>)}</div></article>
-          <article className="signal"><div className="signal-head"><span>Host load</span><i className="neutral-icon"><BoxIcon/></i></div><strong>{overview.load.toFixed(2)}</strong><p>{overview.uptime} uptime</p><div className="meter"><i style={{width:`${Math.min(overview.load*20,100)}%`}}/></div></article>
-          <article className="signal"><div className="signal-head"><span>Memory</span><i className="neutral-icon"><LayersIcon/></i></div><strong>{overview.memory}%</strong><p>Across managed workloads</p><div className="meter"><i style={{width:`${overview.memory}%`}}/></div></article>
-          <article className="signal attention"><div className="signal-head"><span>Needs attention</span><i>3</i></div><strong>3 findings</strong><p>2 certificates · 1 backup</p><button>Review findings <ArrowIcon/></button></article>
-        </section>
-        <section className="columns">
-          <article className="panel projects"><div className="panel-title"><div><h2>Projects</h2><p>Isolated development environments</p></div><button>View all</button></div>
-            <div className="table-head"><span>Project</span><span>Services</span><span>Health</span><span>Updated</span></div>
-            {(overview.projects.length?overview.projects:[{name:"No projects discovered",status:"Initialize under /srv/projects",services:0,health:"idle",updated:"—"}]).map(p=><div className="project-row" key={p.name}><div className="project-name"><i>{p.name.slice(0,2).toUpperCase()}</i><span><b>{p.name}</b><small>{p.status}</small></span></div><span>{p.services}</span><span className={`pill ${p.health}`}>{p.health}</span><span>{p.updated}</span></div>)}
-          </article>
-          <article className="panel services"><div className="panel-title"><div><h2>Control services</h2><p>Local management plane</p></div><span className="quiet">{overview.managers.length} checks</span></div>
-            <div className="service-list">{overview.managers.map((m,i)=><div className="service" key={m.name}><span className={`service-glyph g${i%3}`}><PulseIcon/></span><div><b>{m.name}</b><small>{m.detail}</small></div><span className={`service-state ${m.state}`}><i/>{m.state}</span></div>)}</div>
-          </article>
-        </section>
-        <section className="bottom-grid"><article className="panel activity"><div className="panel-title"><div><h2>Recent activity</h2><p>Immutable operational audit trail</p></div><button>Open audit log</button></div><div className="empty-activity"><ShieldIcon/><b>No mutations in this session</b><span>Approved actions will appear here with actor, target and outcome.</span></div></article><article className="principle"><span>Operating principle 01</span><blockquote>“The interface can make operations easier. It must never make unsafe operations invisible.”</blockquote><p>Every mutation stays explicit, scoped and auditable.</p></article></section>
-      </div>
+    <main className="studio-main">
+      <header className="studio-header"><div className="mobile-brand">SIMHA Studio</div><label className="search"><SearchIcon/><input placeholder="Search conversations, projects, knowledge and capabilities" aria-label="Search"/><kbd>⌘ K</kbd></label><div className="header-actions"><button className="header-link">Audit</button><span className="live"><i/>Live</span><ThemeToggle/></div></header>
+      {active==="Studio"?<Studio workspace={workspace} selected={selected} mode={mode} setMode={setMode} prompt={prompt} setPrompt={setPrompt}/>:<FeaturePage active={active} overview={overview} workspace={workspace}/>}
     </main>
   </div>;
 }
+
+function Studio({workspace,selected,mode,setMode,prompt,setPrompt}:{workspace:Workspace;selected:Capability;mode:string;setMode:(v:string)=>void;prompt:string;setPrompt:(v:string)=>void}){
+  return <div className="studio-content">
+    <section className="studio-intro"><span className="eyebrow">Unified AI workspace</span><h1>What are we making today?</h1><p>Work across code, knowledge and media. SIMHA selects only models and tools that support the job.</p></section>
+    <section className="composer-card">
+      <div className="mode-strip" role="tablist">{workspace.modalities.map(cap=><button key={cap.id} className={mode===cap.id?"active":""} onClick={()=>setMode(cap.id)}>{glyph(cap.id)}<span>{cap.label}</span></button>)}</div>
+      <div className="composer-context"><span>{selected.label} workspace</span><small>{selected.actions.join(" · ")}</small></div>
+      <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder={placeholder(mode)} aria-label="Message"/>
+      <div className="composer-actions"><div><button className="round" title="Attach files">＋</button><button className="tool-chip">◎ Add context</button><button className="tool-chip">◇ Tools</button></div><div><button className="model-chip"><span className="provider-dot"/>Auto · verified free <span>⌄</span></button><button className="send" disabled={!prompt.trim()} aria-label="Send"><ArrowIcon/></button></div></div>
+    </section>
+    <section className="starter-grid">
+      <Starter number="01" title="Review a codebase" copy="Connect a repository, map its architecture and surface the highest-risk changes." action="Open code workspace" onClick={()=>setMode("code")}/>
+      <Starter number="02" title="Build grounded knowledge" copy="Upload PDFs and documents, preserve citations and ask across the collection." action="Add knowledge" onClick={()=>setMode("document")}/>
+      <Starter number="03" title="Create across media" copy="Move from voice or brief to image, video, subtitles and localized variants." action="Open media studio" onClick={()=>setMode("image")}/>
+    </section>
+    <section className="workspace-grid"><article className="workspace-panel"><div className="section-title"><div><span>Active context</span><h2>Bring the right material into the room.</h2></div><button>Manage sources</button></div><div className="context-list"><Context icon="⌘" title="Codebases" meta="Repository, branch, diff and issue context"/><Context icon="▤" title="Knowledge" meta="PDF, docs, tables, websites and collections"/><Context icon="◉" title="Media" meta="Images, audio, video, transcripts and subtitles"/></div></article><article className="workspace-panel policy-panel"><span className="eyebrow">Routing policy</span><h2>Capability before popularity.</h2><p>Models are matched by modality, tools, context, latency and verified cost. Fallbacks stay explicit.</p><dl><div><dt>Gateway</dt><dd>{workspace.routing.gateway}</dd></div><div><dt>Cost</dt><dd>{workspace.routing.costPolicy}</dd></div><div><dt>Assets</dt><dd>{workspace.safety.publicArtifacts}</dd></div></dl></article></section>
+  </div>;
+}
+
+function FeaturePage({active,overview,workspace}:{active:string;overview:Overview;workspace:Workspace}){const copy=featureCopy[active];const types=active==="Registry"?workspace.registry.types:active==="Projects"?overview.projects.map(p=>p.name):workspace.modalities.map(m=>m.label);return <div className="studio-content feature-page"><section className="feature-hero"><div><span className="eyebrow">{copy.eyebrow}</span><h1>{copy.title}</h1><p>{copy.description}</p></div><button className="primary">Create new <ArrowIcon/></button></section><section className="feature-stats"><article><span>Workspace state</span><strong>Ready</strong><small>Policy controls active</small></article><article><span>Available surfaces</span><strong>{types.length||0}</strong><small>{types.slice(0,3).join(" · ")||"Nothing configured"}</small></article><article><span>Security boundary</span><strong>Explicit</strong><small>No automatic public installs</small></article></section><section className="feature-board"><div className="section-title"><div><span>{active} workspace</span><h2>Designed as a native part of SIMHA.</h2></div><button>View documentation</button></div><div className="feature-cards">{featureCards(active).map((x,i)=><article key={x.title}><span>0{i+1}</span><h3>{x.title}</h3><p>{x.copy}</p><button>{x.action} <ArrowIcon/></button></article>)}</div></section></div>}
+
+function Starter({number,title,copy,action,onClick}:{number:string;title:string;copy:string;action:string;onClick:()=>void}){return <article className="starter"><span>{number}</span><h3>{title}</h3><p>{copy}</p><button onClick={onClick}>{action}<ArrowIcon/></button></article>}
+function Context({icon,title,meta}:{icon:string;title:string;meta:string}){return <button className="context-row"><i>{icon}</i><span><b>{title}</b><small>{meta}</small></span><ArrowIcon/></button>}
+function glyph(id:string){return ({text:"Aa",code:"</>",document:"▤",image:"◇",video:"▶",voice:"◉",translation:"文"} as Record<string,string>)[id]??"·"}
+function placeholder(id:string){return ({text:"Ask, write, reason or plan…",code:"Describe the change, paste an error, or attach a repository…",document:"Attach a PDF or document and ask with citations…",image:"Describe an image, attach a reference, or request an edit…",video:"Attach footage or describe the video you want to produce…",voice:"Record, upload, transcribe or synthesize speech…",translation:"Translate text or attach a document, audio or video file…"} as Record<string,string>)[id]}
+function featureCards(active:string){const map:Record<string,{title:string;copy:string;action:string}[]>={Codebases:[{title:"Repository map",copy:"Index symbols, dependencies, ownership and architecture without mixing project boundaries.",action:"Connect repository"},{title:"Change intelligence",copy:"Review diffs, incidents, tests and release risk with full source context.",action:"Start review"},{title:"Agent workspace",copy:"Assign approved skills, MCP tools and instructions to an isolated coding session.",action:"Configure agent"}],Knowledge:[{title:"Document library",copy:"Ingest PDFs, Office documents, Markdown, data tables and structured exports.",action:"Upload sources"},{title:"Web collections",copy:"Collect allowlisted public sources with provenance, robots policy and immutable snapshots.",action:"New collection"},{title:"Grounded answers",copy:"Search, compare and answer with page-level citations and source freshness.",action:"Ask knowledge"}],Media:[{title:"Image lab",copy:"Generate, inspect, edit, OCR and transform visual assets with references.",action:"Open image lab"},{title:"Video desk",copy:"Understand footage, create chapters, generate clips and produce localized subtitles.",action:"Open video desk"},{title:"Voice room",copy:"Transcribe, translate, synthesize and run low-latency spoken conversations.",action:"Open voice room"}],Workflows:[{title:"Canvas",copy:"Compose models, tools, data, branching and human approvals as versioned flows.",action:"New workflow"},{title:"Runs",copy:"Inspect every step, input, output, retry, token and policy decision.",action:"View runs"},{title:"Schedules",copy:"Trigger approved flows on cron, webhook or operational events.",action:"Manage schedules"}],Registry:[{title:"Discovery",copy:"Collect candidates from allowlisted sources into a non-executable quarantine.",action:"Review sources"},{title:"Security review",copy:"Scan permissions, secrets, dependencies, licenses and prompt-injection patterns.",action:"Open queue"},{title:"Publication",copy:"Approve immutable versions for explicit installation into selected projects.",action:"Published catalog"}],Projects:[{title:"Runtime boundary",copy:"Dedicated home, configuration, network and dependency state per project.",action:"New project"},{title:"AI assets",copy:"Install approved skills, agents, MCP and plugins with checksum locks.",action:"Manage assets"},{title:"Recovery",copy:"Back up source and isolated state with verifiable restore points.",action:"Recovery points"}],Operations:[{title:"Health",copy:"See host, gateway, manager and workload state from one restrained surface.",action:"Run verification"},{title:"Audit",copy:"Trace actors, targets, outcomes and duration for every approved mutation.",action:"Open audit"},{title:"Security",copy:"Review exposed edges, credentials, certificates, backups and policy findings.",action:"Review findings"}]};return map[active]??[]}

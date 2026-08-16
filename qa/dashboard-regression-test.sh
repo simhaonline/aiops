@@ -15,6 +15,15 @@ grep -Fq ':root[data-theme="dark"]' dashboard/apps/web/app/styles.css
 grep -Fq '@media(max-width:760px)' dashboard/apps/web/app/styles.css
 grep -Fq 'aria-label="Search"' dashboard/apps/web/app/ui/dashboard-shell.tsx
 grep -Fq 'localStorage.setItem("aiops-theme"' dashboard/apps/web/app/ui/theme-toggle.tsx
+for modality in text code document image video voice translation; do
+  grep -Fq "id:\"$modality\"" dashboard/apps/api/src/workspace.controller.ts
+done
+grep -Fq 'autoInstall:false' dashboard/apps/api/src/workspace.controller.ts
+grep -Fq 'quarantine-first' dashboard/apps/api/src/workspace.controller.ts
+for surface in Studio Codebases Knowledge Media Workflows Registry Projects Operations; do
+  grep -Fq "$surface" dashboard/apps/web/app/ui/dashboard-shell.tsx
+done
+grep -Fq 'camera=(self), microphone=(self)' dashboard/apps/web/next.config.ts
 
 grep -Fq 'operation is not allowlisted' dashboard/broker/main.go
 grep -Fq 'project symlink escapes /srv/projects' dashboard/broker/main.go

@@ -26,7 +26,9 @@ func TestProjectPathAcceptsDirectChild(t *testing.T) {
 		t.Skip("test uses /srv/projects")
 	}
 	root := "/srv/projects"
-	_ = os.MkdirAll(root, 0755)
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Skipf("cannot prepare /srv/projects in this test environment: %v", err)
+	}
 	dir, err := os.MkdirTemp(root, "broker-test-")
 	if err != nil {
 		t.Fatal(err)
