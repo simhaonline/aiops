@@ -160,6 +160,22 @@ project-manager tool-install /srv/projects/example goose
 project-manager secret-set /srv/projects/example mulerouter
 ```
 
+`project-manager init` allocates a loopback UI port from `18080-18999`. Publish
+an enabled code-server through the managed HTTPS edge after starting it:
+
+```bash
+sudo project-manager edge-add /srv/projects/example code-server \
+  ide.example.com admin@example.com projectadmin
+project-manager edges /srv/projects/example
+```
+
+The edge uses Nginx Basic Auth, TLS, WebSocket support, and a loopback-only
+upstream. Remove it before disabling code-server or destroying the project:
+
+```bash
+sudo project-manager edge-remove /srv/projects/example code-server
+```
+
 ```bash
 project-manager backup /srv/projects/example /srv/backups/example.tar.gz
 project-manager restore /srv/backups/example.tar.gz /srv/projects/example-restored

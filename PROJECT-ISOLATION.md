@@ -70,10 +70,23 @@ project-manager feature-enable /srv/projects/example mulerouter
 project-manager features /srv/projects/example
 ```
 
-code-server runs as a project sidecar, uses the same isolated source/home mounts,
-binds to `127.0.0.1`, and receives a unique generated password. Change
-`AIOPS_CODE_SERVER_PORT` in `.aiops/project.env` when several projects run at
-once. Place Nginx authentication or SSO in front before remote access.
+code-server runs as a project sidecar, uses the same isolated source/home
+mounts, binds to `127.0.0.1`, and receives a unique generated password.
+Initialization selects an unused port from `18080-18999` after checking sibling
+projects and active listeners.
+
+Publish the running IDE through the managed Nginx/TLS lifecycle:
+
+```bash
+sudo project-manager edge-add /srv/projects/example code-server \
+  ide.example.com admin@example.com projectadmin
+project-manager edges /srv/projects/example
+sudo project-manager edge-remove /srv/projects/example code-server
+```
+
+The edge adds a second Basic-Auth boundary, supports WebSockets, and never
+changes the upstream loopback bind. `feature-disable` and `destroy` refuse to
+continue while an edge record exists, preventing an orphaned public proxy.
 
 Goose and OpenCodex are installed into the running workspace only after an
 explicit request:
@@ -127,3 +140,6 @@ leaves trusted storage.
   in `compose.yaml` when a project's threat model requires that.
 - A shared host Ollama can be exposed deliberately, but it is not added to a
   project automatically.
+- Nginx is a host security boundary rather than part of the project container.
+  Project backups contain the edge association record, while Nginx configuration
+  and certificates must also be protected with `nginx-manager backup`.

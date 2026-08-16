@@ -138,6 +138,16 @@ app_start() { require_root; systemctl enable --now "$SERVICE"; systemctl is-acti
 app_stop() { require_root; systemctl stop "$SERVICE"; }
 app_restart() { require_root; systemctl restart "$SERVICE"; systemctl is-active --quiet "$SERVICE" || die "Codex App Server failed."; wait_listener || { journalctl -u "$SERVICE" -n 100 --no-pager >&2; die "Codex App Server did not open 127.0.0.1:4500."; }; }
 app_logs() { require_root; journalctl -u "$SERVICE" -n "${1:-200}" --no-pager; }
+nginx_setup() {
+  require_root
+  local domain="${1:-}" email="${2:-}" user="${3:-codexadmin}"
+  [[ -n "$domain" && -n "$email" && -n "$user" ]] || die "Usage: codex-manager nginx-setup DOMAIN EMAIL [AUTH_USER]"
+  [[ -x /usr/local/bin/nginx-manager ]] || die "nginx-manager is required."
+  listener_present || die "Start the Codex App Server before configuring its edge."
+  /usr/local/bin/nginx-manager proxy-add "$domain" "http://127.0.0.1:${APP_PORT}" "$user"
+  /usr/local/bin/nginx-manager ssl-issue "$domain" "$email"
+  /usr/local/bin/nginx-manager site-verify "$domain"
+}
 project_add() {
   begin
   local p
@@ -156,6 +166,7 @@ Lifecycle: install [VERSION] | repair | update [VERSION] | reinstall [VERSION] |
 Inspection: status | verify | doctor | version
 CLI: cli [ARGS...] | login [ARGS...] | auth-status | logout | exec [ARGS...]
 App Server: app-server-start|stop|restart|status|logs [N]
+HTTPS edge: nginx-setup DOMAIN EMAIL [AUTH_USER] | nginx-remove DOMAIN
 Projects: project-add PATH | project-remove PATH | projects
 Backup: backup [ABSOLUTE_FILE]
 Security: App Server is fixed to ws://127.0.0.1:4500. Non-local use requires TLS + WebSocket authentication.
@@ -170,6 +181,7 @@ case "${1:-help}" in
   logout) exec env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" logout;;
   exec) shift; exec env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" exec "$@";;
   app-server-start) app_start;; app-server-stop) app_stop;; app-server-restart) app_restart;; app-server-status) status;; app-server-logs) app_logs "${2:-200}";;
+  nginx-setup) nginx_setup "${2:-}" "${3:-}" "${4:-codexadmin}";; nginx-remove) require_root; /usr/local/bin/nginx-manager proxy-remove "${2:-}";;
   project-add) project_add "${2:-}";; project-remove) project_remove "${2:-}";; projects) projects;; backup) backup "${2:-}";;
   help|-h|--help) help;; *) help; exit 2;;
 esac

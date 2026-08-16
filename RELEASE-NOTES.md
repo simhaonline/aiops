@@ -61,6 +61,11 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 - Added per-project code-server, Goose, OpenCodex and MuleRouter feature support.
 - MuleRouter keys and generated code-server credentials stay in project-only
   secret files rather than images or versioned project environment files.
+- Added automatic code-server port allocation from `18080-18999` and a managed
+  project edge lifecycle with loopback health checks, Nginx Basic Auth, TLS,
+  WebSocket forwarding, association tracking, and orphan-proxy prevention.
+- Added missing HTTPS edge helpers for the Codex App Server and OpenCode Web.
+  CLI-only tools remain intentionally unproxied, and Ollama remains private.
 
 ## Forgejo infrastructure
 

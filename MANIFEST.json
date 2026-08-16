@@ -9,8 +9,8 @@
     },
     "codex-manager": {
       "version": "1.0.0",
-      "sha256": "0f571e8364963a49db96d4c55a4d9ba065e77729c320ca7610896781ac089330",
-      "size_bytes": 9361
+      "sha256": "9bac98ee3b8fc1e01ce83433c2ebb7bf9a890b46acd358fb65315c59dc6ce09f",
+      "size_bytes": 10155
     },
     "docker-manager": {
       "version": "1.0.0",
@@ -84,13 +84,13 @@
     },
     "opencode-manager": {
       "version": "1.0.0",
-      "sha256": "7e906e63d0805f6f4d736f6a52a4ef8dbface12970243328c4359beaae8fc106",
-      "size_bytes": 7747
+      "sha256": "70e160511cee4908b5c7029beae0524bfbb5e71ef2677253f74b0f67ea4e8b51",
+      "size_bytes": 8439
     },
     "project-manager": {
       "version": "1.0.0",
-      "sha256": "ce7f6336b1cb7a3114e6cfd8a349c8178d49116049f8cbd67568ae0eb28834d5",
-      "size_bytes": 16878
+      "sha256": "a7e8627a7b6fdbb3a5868e45c2d04362b5e0e5f1b0ad34ad6a22c64f988b1a66",
+      "size_bytes": 21547
     },
     "system-manager": {
       "version": "1.0.0",

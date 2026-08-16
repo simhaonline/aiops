@@ -148,14 +148,21 @@ project-manager feature-enable /srv/projects/example code-server
 project-manager up /srv/projects/example
 ```
 
-The default address is:
+The local address uses the project-specific port recorded in
+`.aiops/project.env`:
 
 ```text
-http://127.0.0.1:8080
+http://127.0.0.1:AIOPS_CODE_SERVER_PORT
 ```
 
-If another project already uses that port, change
-`AIOPS_CODE_SERVER_PORT` in `.aiops/project.env`, then restart the project.
+Initialization selects an unused port from `18080-18999`. An administrator can
+publish it without exposing the container port to the LAN:
+
+```bash
+sudo project-manager edge-add /srv/projects/example code-server \
+  ide.example.com admin@example.com projectadmin
+project-manager edges /srv/projects/example
+```
 
 The generated password is stored at:
 
@@ -170,6 +177,7 @@ not change the bind address to `0.0.0.0` yourself.
 Disable the feature while preserving its settings:
 
 ```bash
+sudo project-manager edge-remove /srv/projects/example code-server
 project-manager feature-disable /srv/projects/example code-server
 ```
 
@@ -315,4 +323,3 @@ install the dependency globally on the host as a workaround.
 - Run tests before pushing changes.
 - Back up before major dependency, agent, or configuration changes.
 - Stop and report unexpected access to other projects or host files.
-

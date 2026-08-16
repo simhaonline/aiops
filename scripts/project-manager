@@ -10,6 +10,7 @@ readonly ENV_REL="${MANAGED_DIR}/project.env"
 readonly DOCKERFILE_REL="${MANAGED_DIR}/container/Dockerfile"
 readonly FEATURE_REL="${MANAGED_DIR}/features"
 readonly SECRET_REL="${MANAGED_DIR}/secrets"
+readonly NGINX_MANAGER="${AIOPS_NGINX_MANAGER:-/usr/local/bin/nginx-manager}"
 
 die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 info(){ printf '[INFO] %s\n' "$*"; }
@@ -61,12 +62,30 @@ compose(){
   docker compose "${args[@]}" "$@"
 }
 
+allocate_code_server_port(){
+  local root="$1" parent candidate used
+  parent="$(dirname "$root")"
+  for candidate in $(seq 18080 18999); do
+    used="$(find "$parent" -mindepth 2 -maxdepth 3 -type f -path '*/.aiops/project.env' -exec \
+      awk -F= '$1=="AIOPS_CODE_SERVER_PORT" {print $2}' {} + 2>/dev/null || true)"
+    grep -Fxq "$candidate" <<<"$used" && continue
+    if command -v ss >/dev/null 2>&1 && \
+      ss -H -lnt 2>/dev/null | awk -v suffix=":${candidate}" '$4 ~ suffix"$" {found=1} END {exit !found}'; then
+      continue
+    fi
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  die "No free project UI port is available in 18080-18999."
+}
+
 write_templates(){
-  local root="$1" name="$2" uid gid
+  local root="$1" name="$2" uid gid code_server_port
   uid="${AIOPS_PROJECT_UID:-$(id -u)}"; gid="${AIOPS_PROJECT_GID:-$(id -g)}"
   [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || die "Project UID/GID must be numeric."
   if [[ "$uid" == 0 ]]; then uid=10000; fi
   if [[ "$gid" == 0 ]]; then gid=10000; fi
+  code_server_port="$(allocate_code_server_port "$root")"
   install -d -m 0700 \
     "$root/$MANAGED_DIR/container" \
     "$root/$MANAGED_DIR/home/.codex/skills" \
@@ -82,7 +101,7 @@ AIOPS_UID=$uid
 AIOPS_GID=$gid
 AIOPS_BASE_IMAGE=ubuntu:24.04
 AIOPS_PACKAGES=ca-certificates curl git jq build-essential python3 python3-venv python3-pip nodejs npm golang-go
-AIOPS_CODE_SERVER_PORT=8080
+AIOPS_CODE_SERVER_PORT=$code_server_port
 EOF
 
   cat >"$root/$DOCKERFILE_REL" <<'EOF'
@@ -178,6 +197,74 @@ EOF
 
 feature_enabled(){ [[ -f "$1/$FEATURE_REL/$2.enabled" ]]; }
 
+env_value(){
+  local file="$1" key="$2"
+  awk -F= -v key="$key" '$1==key {print substr($0,index($0,"=")+1); exit}' "$file"
+}
+
+validate_port(){
+  [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1024 && 10#$1 <= 65535)) || \
+    die "Invalid loopback port: $1"
+}
+
+validate_domain(){
+  [[ ${#1} -le 253 && "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$1" == *.* ]] || \
+    die "Invalid DNS domain: $1"
+}
+
+validate_email(){ [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "Invalid email address."; }
+validate_auth_user(){ [[ "$1" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "Invalid authentication username."; }
+
+edge_file(){ printf '%s/%s/%s.edge\n' "$1" "$FEATURE_REL" "$2"; }
+
+edge_add(){
+  local root feature domain email user port upstream record
+  root="$(project_root "${1:-$PWD}")"; feature="${2:-}"; domain="${3:-}"; email="${4:-}"; user="${5:-projectadmin}"
+  [[ "$feature" == code-server ]] || die "Supported project edge: code-server"
+  feature_enabled "$root" "$feature" || die "Enable '$feature' before publishing its edge."
+  validate_domain "$domain"; validate_email "$email"; validate_auth_user "$user"
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "edge-add changes system Nginx configuration; run it with sudo."
+  [[ -x "$NGINX_MANAGER" ]] || die "nginx-manager is not installed at $NGINX_MANAGER"
+  port="$(env_value "$root/$ENV_REL" AIOPS_CODE_SERVER_PORT)"; validate_port "$port"
+  upstream="http://127.0.0.1:${port}"
+  curl -fsS --connect-timeout 2 --max-time 8 "$upstream/healthz" >/dev/null || \
+    die "code-server is not healthy at $upstream; start the project first."
+  "$NGINX_MANAGER" proxy-add "$domain" "$upstream" "$user"
+  "$NGINX_MANAGER" ssl-issue "$domain" "$email"
+  "$NGINX_MANAGER" site-verify "$domain"
+  record="$(edge_file "$root" "$feature")"
+  printf 'DOMAIN=%s\nUPSTREAM=%s\nAUTH_USER=%s\n' "${domain,,}" "$upstream" "$user" >"$record"
+  chown --reference="$root/$ENV_REL" "$record"
+  chmod 0600 "$record"
+  info "Project edge ready: https://${domain,,} -> $upstream"
+}
+
+edge_remove(){
+  local root feature record domain
+  root="$(project_root "${1:-$PWD}")"; feature="${2:-}"; record="$(edge_file "$root" "$feature")"
+  [[ "$feature" == code-server ]] || die "Supported project edge: code-server"
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "edge-remove changes system Nginx configuration; run it with sudo."
+  [[ -x "$NGINX_MANAGER" ]] || die "nginx-manager is not installed at $NGINX_MANAGER"
+  [[ -f "$record" ]] || die "No managed edge record exists for $feature."
+  domain="$(env_value "$record" DOMAIN)"; validate_domain "$domain"
+  "$NGINX_MANAGER" proxy-remove "$domain"
+  rm -f -- "$record"
+  info "Removed project edge for $feature: $domain"
+}
+
+edge_list(){
+  local root feature record
+  root="$(project_root "${1:-$PWD}")"
+  for feature in code-server; do
+    record="$(edge_file "$root" "$feature")"
+    if [[ -f "$record" ]]; then
+      printf '%-14s %s -> %s\n' "$feature" "$(env_value "$record" DOMAIN)" "$(env_value "$record" UPSTREAM)"
+    else
+      printf '%-14s not-published\n' "$feature"
+    fi
+  done
+}
+
 feature_enable(){
   local root feature password
   root="$(project_root "${1:-$PWD}")"; feature="${2:-}"
@@ -231,6 +318,8 @@ EOF
 feature_disable(){
   local root feature
   root="$(project_root "${1:-$PWD}")"; feature="${2:-}"
+  [[ ! -f "$(edge_file "$root" "$feature")" ]] || \
+    die "Remove the managed public edge first: sudo project-manager edge-remove '$root' '$feature'"
   case "$feature" in
     code-server) compose "$root" rm -sf code-server 2>/dev/null || true; rm -f -- "$root/$FEATURE_REL/code-server.yaml" ;;
     goose|opencodex|mulerouter) ;;
@@ -370,6 +459,8 @@ destroy_project(){
   local root confirm="${2:-}"
   root="$(project_root "${1:-$PWD}")"
   [[ "$confirm" == --yes ]] || die "Destructive operation. Re-run: project-manager destroy '$root' --yes"
+  [[ -z "$(find "$root/$FEATURE_REL" -maxdepth 1 -type f -name '*.edge' -print -quit)" ]] || \
+    die "Remove all managed public edges before destroying this project."
   compose "$root" down --remove-orphans
   rm -rf -- "$root/$MANAGED_DIR"
   info "Removed project containers and isolated state. Source files were preserved."
@@ -405,6 +496,12 @@ Project features:
   tool-install PATH NAME    Install enabled Goose/OpenCodex in isolated HOME
   secret-set PATH NAME      Prompt for a project-specific provider credential
 
+HTTPS edge (code-server):
+  edge-add PATH NAME DOMAIN EMAIL [AUTH_USER]
+                            Create Basic-Auth Nginx proxy and TLS certificate
+  edge-remove PATH NAME     Remove the managed Nginx proxy
+  edges [PATH]              List project UI publication state
+
 The host Docker socket and host AI-tool configuration are never mounted.
 
 Initialization maps the calling user's UID/GID. When invoked by root it uses
@@ -438,6 +535,9 @@ main(){
     feature-disable) feature_disable "${1:-$PWD}" "${2:-}" ;;
     tool-install) tool_install "${1:-$PWD}" "${2:-}" ;;
     secret-set) secret_set "${1:-$PWD}" "${2:-}" ;;
+    edge-add) edge_add "${1:-$PWD}" "${2:-}" "${3:-}" "${4:-}" "${5:-projectadmin}" ;;
+    edge-remove) edge_remove "${1:-$PWD}" "${2:-}" ;;
+    edges) edge_list "${1:-$PWD}" ;;
     verify) verify_project "${1:-$PWD}" ;;
     backup) backup_project "${1:-$PWD}" "${2:-}" ;;
     restore) restore_project "${1:-}" "${2:-}" ;;

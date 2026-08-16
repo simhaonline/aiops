@@ -117,6 +117,9 @@ grep -Fq 'HERMES_DASHBOARD_PORT="${HERMES_DASHBOARD_PORT:-9119}"' scripts/hermes
 grep -Fq '127.0.0.1:4000' scripts/litellm-manager || die "LiteLLM loopback policy missing."
 grep -Fq '127.0.0.1:3000' scripts/llmrouter-manager || die "LMRouter loopback policy missing."
 grep -Fq '127.0.0.1:4096' scripts/opencode-manager || die "OpenCode loopback policy missing."
+grep -Fq 'nginx-setup DOMAIN EMAIL [AUTH_USER]' scripts/codex-manager || die "Codex authenticated WebSocket edge integration missing."
+grep -Fq 'nginx-setup DOMAIN EMAIL' scripts/opencode-manager || die "OpenCode edge integration missing."
+grep -Fq 'edge-add PATH NAME DOMAIN EMAIL [AUTH_USER]' scripts/project-manager || die "Project UI edge lifecycle missing."
 pass "Core security policy gates"
 
 # Normal canonical source check validates the maintained managers.

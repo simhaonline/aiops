@@ -105,12 +105,14 @@ web_restart() { require_root; systemctl restart "$SERVICE"; systemctl is-active 
 logs() { require_root; journalctl -u "$SERVICE" -n "${1:-200}" --no-pager; }
 doctor() { status; echo; node_cmd npm list -g --depth=0 "$PACKAGE" 2>/dev/null || true; echo; ss -H -lntp | grep ':4096' || true; echo; logs 80 || true; }
 backup() { require_root; local out="${1:-/root/opencode-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}" items=(); [[ "$out" == /* ]] || die "Backup path must be absolute."; [[ -d /root/.config/opencode ]] && items+=(.config/opencode); [[ -d /root/.local/share/opencode ]] && items+=(.local/share/opencode); if ((${#items[@]})); then tar -C /root -czf "$out" "${items[@]}"; else tar -czf "$out" --files-from /dev/null; fi; chmod 0600 "$out"; echo "$out"; }
+nginx_setup() { require_root; local domain="${1:-}" email="${2:-}"; [[ -n "$domain" && -n "$email" ]] || die "Usage: opencode-manager nginx-setup DOMAIN EMAIL"; [[ -x /usr/local/bin/nginx-manager ]] || die "nginx-manager is required."; listener_present || die "Start OpenCode Web before configuring its edge."; /usr/local/bin/nginx-manager proxy-add-api "$domain" "http://127.0.0.1:${PORT}"; /usr/local/bin/nginx-manager ssl-issue "$domain" "$email"; /usr/local/bin/nginx-manager site-verify "$domain"; }
 help() { cat <<EOF
 opencode-manager $MANAGER_VERSION
 Lifecycle: install | repair | update | reinstall | check-update
 Inspection: status | verify | doctor | version
 CLI: cli [ARGS...] | run [ARGS...] | auth [ARGS...] | mcp [ARGS...] | models [ARGS...]
 Web: web-start|stop|restart|status|logs [N]
+HTTPS edge: nginx-setup DOMAIN EMAIL | nginx-remove DOMAIN
 Backup: backup [FILE]
 Server: http://127.0.0.1:4096 with OpenCode's own Basic Auth; auto-update checks disabled for manager-controlled lifecycle.
 EOF
@@ -119,5 +121,6 @@ case "${1:-help}" in
   install) install_oc;; repair) repair;; update) update;; reinstall) reinstall;; check-update) check_update;; status) status;; verify) verify_oc;; doctor) doctor;; version) version;;
   cli) shift; exec "$BIN" "$@";; run) shift; exec "$BIN" run "$@";; auth) shift; exec "$BIN" auth "$@";; mcp) shift; exec "$BIN" mcp "$@";; models) shift; exec "$BIN" models "$@";;
   web-start) web_start;; web-stop) web_stop;; web-restart) web_restart;; web-status) status;; web-logs) logs "${2:-200}";; backup) backup "${2:-}";;
+  nginx-setup) nginx_setup "${2:-}" "${3:-}";; nginx-remove) require_root; /usr/local/bin/nginx-manager proxy-remove "${2:-}";;
   help|-h|--help) help;; *) help; exit 2;;
 esac

@@ -182,9 +182,10 @@ project-manager up /srv/projects/example
 project-manager status /srv/projects/example
 ```
 
-Every project must use a unique `AIOPS_PROJECT_NAME`. Assign a unique
-`AIOPS_CODE_SERVER_PORT` before enabling code-server on multiple concurrent
-projects.
+Every project must use a unique `AIOPS_PROJECT_NAME`. Initialization allocates
+an unused `AIOPS_CODE_SERVER_PORT` from `18080-18999` after checking sibling
+managed projects and active listeners. Review the allocation before starting a
+restored copy alongside its source project.
 
 ## 6. Optional project features
 
@@ -196,6 +197,41 @@ project-manager feature-enable /srv/projects/example goose
 project-manager feature-enable /srv/projects/example opencodex
 project-manager feature-enable /srv/projects/example mulerouter
 ```
+
+Start code-server before publishing it, then create its managed TLS edge:
+
+```bash
+project-manager up /srv/projects/example
+sudo project-manager edge-add /srv/projects/example code-server \
+  ide.example.com admin@example.com projectadmin
+project-manager edges /srv/projects/example
+```
+
+The command verifies the loopback health endpoint, creates an authenticated
+Nginx WebSocket proxy, issues the certificate, verifies the site, and records
+the association in `.aiops/features/code-server.edge`. Removal is intentionally
+ordered so Nginx cannot retain an orphaned public route:
+
+```bash
+sudo project-manager edge-remove /srv/projects/example code-server
+project-manager feature-disable /srv/projects/example code-server
+```
+
+Host services use their own edge helpers where applicable:
+
+```bash
+sudo nginx-manager harness-setup harness.example.com admin@example.com harnessadmin
+sudo nginx-manager hermes-setup hermes.example.com admin@example.com hermesadmin
+sudo codex-manager nginx-setup codex.example.com admin@example.com codexadmin
+sudo opencode-manager nginx-setup opencode.example.com admin@example.com
+sudo litellm-manager nginx-setup llm.example.com admin@example.com
+sudo llmrouter-manager nginx-setup router.example.com admin@example.com
+```
+
+Codex uses edge Basic Auth and WebSocket forwarding. OpenCode preserves its
+application Authorization header because it already generates native server
+credentials. Claude, Goose and Freebuff are CLI tools and have no HTTP edge;
+MuleRouter is an external provider; Ollama remains private on loopback.
 
 Goose and OpenCodex require an explicit installation into the isolated project
 home:
@@ -383,4 +419,3 @@ Before a production change:
 6. Apply the smallest scoped change.
 7. Run manager verification and an application-level test.
 8. Record the outcome and retain logs.
-
