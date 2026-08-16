@@ -10,6 +10,7 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 - Added `aiops`, a safe phase-aware CLI dispatcher for every runtime manager.
 - Moved WireGuard client exports to `/etc/wireguard/client`, including automatic migration from the legacy root-home location.
 - Added an enforced Ollama Cloud-only model catalog and post-install model selector.
+- Added root-only NVIDIA NIM/OpenRouter credentials and fail-closed free-model discovery for LiteLLM.
 - Exact supported bootstrap:
   `curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh | bash`
 - Downloads and verifies `SHA256SUMS.txt`.

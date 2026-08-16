@@ -196,6 +196,9 @@ pass "WireGuard client storage regression"
 qa/ollama-cloud-catalog-regression-test.sh >/dev/null
 pass "Ollama Cloud-only model catalog regression"
 
+qa/litellm-free-providers-regression-test.sh >/dev/null
+pass "LiteLLM free-provider filtering regression"
+
 # Test the real bootstrap download/check logic without Internet or mutation.
 # The mock covers both GitHub commit resolution and raw downloads from the
 # resulting immutable commit SHA.

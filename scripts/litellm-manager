@@ -36,6 +36,21 @@ readonly SERVICE="litellm.service"
 readonly UNIT="/etc/systemd/system/${SERVICE}"
 readonly HOST="127.0.0.1"
 readonly PORT="4000"
+readonly NVIDIA_MODELS_API="https://integrate.api.nvidia.com/v1/models"
+readonly OPENROUTER_MODELS_API="https://openrouter.ai/api/v1/models"
+# Text/chat-capable cards verified as "Free Endpoint" in NVIDIA's official
+# build catalog for this release. Live API discovery is intersected with this
+# fail-closed list; a card must be re-verified before a future list update.
+readonly -a NVIDIA_FREE_ENDPOINT_CARDS=(
+  diffusiongemma-26b-a4b-it
+  glm-5.2
+  inkling
+  laguna-xs-2.1
+  minimax-m3
+  nemotron-3-nano-30b-a3b
+  nemotron-3-super-120b-a12b
+  nemotron-3-ultra-550b-a55b
+)
 
 install_deps() { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl python3 python3-venv python3-dev build-essential libffi-dev openssl util-linux; }
 ensure_user() {
@@ -49,7 +64,8 @@ ensure_user() {
   install -d -o root -g root -m 0755 "$ROOT" "$RELEASES" "$CONF_DIR"
 }
 ensure_config() {
-  if [[ ! -f "$ENV_FILE" ]]; then local k; k="sk-$(openssl rand -hex 32)"; printf 'LITELLM_MASTER_KEY=%s\nUI_USERNAME=admin\n' "$k" >"$ENV_FILE"; fi
+  if [[ ! -f "$ENV_FILE" ]]; then local k; k="sk-$(openssl rand -hex 32)"; printf 'LITELLM_MASTER_KEY=%s\nUI_USERNAME=admin\nNVIDIA_NIM_API_BASE=https://integrate.api.nvidia.com/v1\n' "$k" >"$ENV_FILE"; fi
+  grep -q '^NVIDIA_NIM_API_BASE=' "$ENV_FILE" || printf 'NVIDIA_NIM_API_BASE=https://integrate.api.nvidia.com/v1\n' >>"$ENV_FILE"
   chown root:root "$ENV_FILE"; chmod 0600 "$ENV_FILE"
   if [[ ! -f "$CONFIG" ]]; then cat >"$CONFIG" <<'EOF'
 model_list: []
@@ -60,6 +76,144 @@ litellm_settings:
 EOF
   fi
   chown root:"$GROUP" "$CONFIG"; chmod 0640 "$CONFIG"
+}
+
+env_value() { sed -n "s/^$1=//p" "$ENV_FILE" 2>/dev/null | tail -n1; }
+set_secret() {
+  require_root
+  ensure_user
+  ensure_config
+  local provider="${1:-}" variable prompt key temp
+  case "$provider" in
+    nvidia) variable=NVIDIA_NIM_API_KEY; prompt='NVIDIA NIM API key' ;;
+    openrouter) variable=OPENROUTER_API_KEY; prompt='OpenRouter API key' ;;
+    *) die "Usage: litellm-manager set-provider-key nvidia|openrouter" ;;
+  esac
+  printf '%s (input hidden): ' "$prompt" >&2
+  IFS= read -r -s key
+  printf '\n' >&2
+  [[ -n "$key" && "$key" != *$'\n'* && "$key" != *$'\r'* ]] || die "Invalid API key."
+  temp="$(mktemp)"
+  awk -v name="$variable" 'index($0, name "=") != 1 {print}' "$ENV_FILE" >"$temp"
+  printf '%s=%s\n' "$variable" "$key" >>"$temp"
+  install -o root -g root -m 0600 "$temp" "$ENV_FILE"
+  rm -f -- "$temp"
+  unset key
+  info "$provider API key stored root-only in $ENV_FILE"
+}
+
+clear_provider_key() {
+  require_root
+  local provider="${1:-}" variable temp
+  case "$provider" in
+    nvidia) variable=NVIDIA_NIM_API_KEY ;;
+    openrouter) variable=OPENROUTER_API_KEY ;;
+    *) die "Usage: litellm-manager clear-provider-key nvidia|openrouter" ;;
+  esac
+  [[ -f "$ENV_FILE" ]] || return 0
+  temp="$(mktemp)"
+  awk -v name="$variable" 'index($0, name "=") != 1 {print}' "$ENV_FILE" >"$temp"
+  install -o root -g root -m 0600 "$temp" "$ENV_FILE"
+  rm -f -- "$temp"
+  info "$provider API key removed."
+}
+
+provider_key_status() {
+  require_root
+  local provider variable
+  for provider in nvidia openrouter; do
+    [[ "$provider" == nvidia ]] && variable=NVIDIA_NIM_API_KEY || variable=OPENROUTER_API_KEY
+    if [[ -n "$(env_value "$variable")" ]]; then
+      printf '%-12s CONFIGURED\n' "$provider"
+    else
+      printf '%-12s NOT CONFIGURED\n' "$provider"
+    fi
+  done
+}
+
+parse_openrouter_free_models() {
+  python3 - "$1" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1], encoding="utf-8"))
+for model in data.get("data", []):
+    model_id=model.get("id", "")
+    pricing=model.get("pricing") or {}
+    required=("prompt", "completion", "request")
+    try:
+        strictly_free=(model_id.endswith(":free") and
+            all(key in pricing for key in required) and
+            all(float(value) == 0 for value in pricing.values() if value is not None))
+    except (TypeError, ValueError):
+        strictly_free=False
+    if strictly_free:
+        print(model_id)
+PY
+}
+
+parse_nvidia_free_models() {
+  python3 - "$1" "${NVIDIA_FREE_ENDPOINT_CARDS[@]}" <<'PY'
+import json, sys
+approved=set(sys.argv[2:])
+data=json.load(open(sys.argv[1], encoding="utf-8"))
+for model in data.get("data", []):
+    model_id=model.get("id", "")
+    if isinstance(model_id, str) and model_id.rsplit("/", 1)[-1] in approved:
+        print(model_id)
+PY
+}
+
+fetch_free_models() {
+  require_root
+  local provider="${1:-all}" key temp
+  case "$provider" in
+    nvidia)
+      key="$(env_value NVIDIA_NIM_API_KEY)"; [[ -n "$key" ]] || die "NVIDIA key missing; run set-provider-key nvidia."
+      temp="$(mktemp)"; chmod 0600 "$temp"
+      curl -fsSL --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $key" "$NVIDIA_MODELS_API" -o "$temp"
+      parse_nvidia_free_models "$temp"; rm -f -- "$temp"; unset key
+      ;;
+    openrouter)
+      key="$(env_value OPENROUTER_API_KEY)"; [[ -n "$key" ]] || die "OpenRouter key missing; run set-provider-key openrouter."
+      temp="$(mktemp)"; chmod 0600 "$temp"
+      curl -fsSL --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $key" "$OPENROUTER_MODELS_API" -o "$temp"
+      parse_openrouter_free_models "$temp"; rm -f -- "$temp"; unset key
+      ;;
+    all) fetch_free_models nvidia; fetch_free_models openrouter ;;
+    *) die "Usage: litellm-manager free-models nvidia|openrouter|all" ;;
+  esac
+}
+
+sync_free_models() {
+  require_root
+  [[ -x "$CURRENT/bin/python" ]] || die "LiteLLM runtime missing; run install first."
+  local provider="${1:-all}" temp models
+  temp="$(mktemp)"; chmod 0600 "$temp"
+  fetch_free_models "$provider" >"$temp"
+  [[ -s "$temp" ]] || { rm -f -- "$temp"; die "No verified free models returned; configuration unchanged."; }
+  models="$(tr '\n' ',' <"$temp")"
+  "$CURRENT/bin/python" - "$CONFIG" "$provider" "$models" <<'PY'
+import sys, yaml
+path, provider, raw=sys.argv[1:]
+models=[x for x in raw.split(",") if x]
+with open(path, encoding="utf-8") as f: config=yaml.safe_load(f) or {}
+current=config.get("model_list") or []
+prefixes=("nvidia-free/", "openrouter-free/") if provider == "all" else (provider+"-free/",)
+current=[m for m in current if not str(m.get("model_name", "")).startswith(prefixes)]
+for model in models:
+    is_openrouter=model.endswith(":free")
+    name=("openrouter-free/" if is_openrouter else "nvidia-free/")+model
+    params={"model": ("openrouter/" if is_openrouter else "nvidia_nim/")+model,
+            "api_key": "os.environ/"+("OPENROUTER_API_KEY" if is_openrouter else "NVIDIA_NIM_API_KEY")}
+    if not is_openrouter: params["api_base"]="os.environ/NVIDIA_NIM_API_BASE"
+    current.append({"model_name": name, "litellm_params": params})
+config["model_list"]=current
+with open(path, "w", encoding="utf-8") as f: yaml.safe_dump(config, f, sort_keys=False)
+PY
+  rm -f -- "$temp"
+  chown root:"$GROUP" "$CONFIG"; chmod 0640 "$CONFIG"
+  config_check >/dev/null
+  if systemctl is-active --quiet "$SERVICE"; then restart; fi
+  info "Verified free $provider models synchronized into $CONFIG"
 }
 stage() {
   local ver="${1:-latest}" dir old=""
@@ -134,7 +288,11 @@ help() { cat <<EOF
 litellm-manager $MANAGER_VERSION
 Lifecycle: install [VERSION] | repair | update [VERSION] | reinstall [VERSION] | rollback | check-update
 Service: start | stop | restart | status | logs [N]
-Inspection: verify | doctor | version | config-check | key-status
+Inspection: verify | doctor | version | config-check | key-status | provider-key-status
+Free providers: set-provider-key nvidia|openrouter
+                clear-provider-key nvidia|openrouter
+                free-models nvidia|openrouter|all
+                sync-free-models nvidia|openrouter|all
 Public edge: nginx-setup DOMAIN EMAIL
 Backup: backup [FILE]
 Gateway: http://127.0.0.1:4000; Admin UI is provided by LiteLLM at /ui when supported/configured.
@@ -143,5 +301,6 @@ EOF
 case "${1:-help}" in
   install) install_ll "${2:-latest}";; repair) repair;; update) update "${2:-latest}";; reinstall) reinstall "${2:-latest}";; rollback) rollback;; check-update) check_update;;
   start) start;; stop) stop;; restart) restart;; status) status;; logs) logs "${2:-200}";; verify) verify_ll;; doctor) doctor;; version) version;; config-check) config_check;; key-status) key_status;;
+  set-provider-key) set_secret "${2:-}";; clear-provider-key) clear_provider_key "${2:-}";; provider-key-status) provider_key_status;; free-models) fetch_free_models "${2:-all}";; sync-free-models) sync_free_models "${2:-all}";;
   nginx-setup) nginx_setup "${2:-}" "${3:-}";; backup) backup "${2:-}";; help|-h|--help) help;; *) help; exit 2;;
 esac

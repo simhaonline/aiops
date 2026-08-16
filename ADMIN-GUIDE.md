@@ -86,6 +86,26 @@ sudo ollama-manager install-cloud glm-5.2:cloud kimi-k2.7-code:cloud
 The interactive installer offers the same selector after runtime setup.
 Non-interactive installations print the follow-up command without blocking.
 
+LiteLLM can expose verified free NVIDIA NIM and OpenRouter models without
+placing provider secrets in YAML. Enter keys through hidden prompts, inspect
+the filtered inventory, then synchronize it:
+
+```bash
+sudo litellm-manager set-provider-key nvidia
+sudo litellm-manager set-provider-key openrouter
+sudo litellm-manager provider-key-status
+sudo litellm-manager free-models all
+sudo litellm-manager sync-free-models all
+```
+
+Remove a provider credential when it is no longer needed with
+`sudo litellm-manager clear-provider-key nvidia|openrouter`.
+
+OpenRouter models must use a `:free` identifier and report zero for every
+published pricing dimension. NVIDIA models must both appear in the authenticated
+hosted API and match a model card explicitly verified as `Free Endpoint` in this
+manager release. Unknown or ambiguous models fail closed and are not configured.
+
 Install rootless Docker before project environments or Forgejo:
 
 ```bash

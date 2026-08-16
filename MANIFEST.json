@@ -64,8 +64,8 @@
     },
     "litellm-manager": {
       "version": "1.0.0",
-      "sha256": "d637040998b5df8d2d3f7698002762d81ad261bd59726564a133592130bee66d",
-      "size_bytes": 9515
+      "sha256": "313b3fad7673e5fe2e485bf97e178a9baa3c0a1e10c4c4cbe4630b156f0fa07a",
+      "size_bytes": 16137
     },
     "llmrouter-manager": {
       "version": "1.0.0",
