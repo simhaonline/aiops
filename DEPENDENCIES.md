@@ -38,4 +38,8 @@ through `nginx-manager`.
 
 `aiops-dashboard-manager` builds the Next.js and NestJS containers with Node
 22, compiles the Go broker in a pinned Go container, and runs dependency-free
-Python telemetry as an unprivileged systemd service.
+Python telemetry as an unprivileged systemd service. The dashboard includes the
+native SIMHA Studio UI and capability API for text, codebases, documents,
+image, video, voice, translation, workflows, projects, registry assets, and
+operations. See `ARCHITECTURE-REPORT.md` for the request lifecycle and current
+backend delivery boundary.

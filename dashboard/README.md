@@ -1,6 +1,13 @@
 # SIMHA AiOps Dashboard
 
-The dashboard now includes the native SIMHA Studio product shell for text, codebases, PDFs and documents, images, video, voice, translation, workflows, projects, and a governed skills/agents/MCP/plugins registry. See [PRODUCT.md](PRODUCT.md) for the capability map and trust boundaries.
+The dashboard includes the native SIMHA Studio product shell for text,
+codebases, PDFs and documents, images, video, voice, translation, knowledge,
+workflows, projects, operations, and a governed skills/agents/MCP/plugins
+registry. The current release provides the UI and capability contract; full
+streaming conversations, persistence, media workers, and workflow execution
+are subsequent backend layers. See [PRODUCT.md](PRODUCT.md) and the repository
+root [ARCHITECTURE-REPORT.md](../ARCHITECTURE-REPORT.md) for the capability map,
+request lifecycle, and trust boundaries.
 
 A security-first operations interface composed of four deliberately separate
 processes:

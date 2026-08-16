@@ -30,6 +30,14 @@ broker accepts only enumerated actions, direct children of `/srv/projects`,
 safe collection names, bounded execution time and bounded response output;
 every attempted operation is appended to the audit log.
 
+SIMHA Studio treats skills, agents, MCP servers, plugins, documents, media, and
+public collection results as untrusted inputs. Registry content enters
+quarantine, is scanned and reviewed, and requires explicit project
+installation. Provider credentials remain server-side; the browser never
+receives LiteLLM, NVIDIA NIM, OpenRouter, or Ollama credentials. The Studio
+capability contract uses explicit model fallbacks and does not silently select
+paid providers.
+
 Checksums protect against accidental corruption or inconsistent payloads. They are not a substitute for repository/account security or signed-release provenance.
 
 ## Runtime exposure

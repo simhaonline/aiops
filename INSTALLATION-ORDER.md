@@ -84,6 +84,12 @@ sudo aiops-dashboard-manager install /path/to/aiops/dashboard
 sudo aiops-dashboard-manager verify
 ```
 
+The dashboard installs the native SIMHA Studio shell. It exposes the complete
+multimodal navigation and safety capability contract; conversation streaming,
+persistent history, media workers, and workflow execution are separate backend
+delivery layers. Keep the dashboard loopback-only unless the Nginx
+authentication/TLS edge is configured.
+
 ```bash
 manager-suite versions
 sudo manager-suite verify

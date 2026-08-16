@@ -237,7 +237,7 @@ separate so large datasets need not be included in every project backup.
 ## AiOps operations dashboard
 
 The optional dashboard is a four-process control plane with a responsive,
-accessible light/dark interface:
+accessible light/dark SIMHA Studio interface:
 
 ```bash
 sudo aiops-dashboard-manager install /path/to/aiops/dashboard
@@ -245,12 +245,19 @@ sudo aiops-dashboard-manager verify
 sudo aiops-dashboard-manager nginx-setup ops.example.com admin@example.com aiopsadmin
 ```
 
-Next.js serves the interface, NestJS provides validated APIs, Python exports
-host telemetry, and a small Go broker owns the only privileged boundary. The
-web containers do not mount the Docker socket and cannot execute arbitrary
-commands. The first UI release is observability-first; its mutation API accepts
-only seven explicit operations, validates direct `/srv/projects` targets, times
-out execution, truncates output, and writes a JSON audit record.
+Next.js serves the native Studio interface, NestJS provides validated APIs,
+Python exports host telemetry, and a small Go broker owns the only privileged
+boundary. Studio exposes text, codebase, PDF/document, image, video, voice,
+translation, knowledge, workflow, project, registry, and operations surfaces.
+The capability contract routes through LiteLLM using capability-aware,
+verified-free-first model policy with explicit fallbacks. The web containers do
+not mount the Docker socket and cannot execute arbitrary commands. Its mutation
+API accepts only seven explicit operations, validates direct `/srv/projects`
+targets, times out execution, truncates output, and writes a JSON audit record.
+The current Studio release establishes the UI and capability contract; full
+conversation persistence, streaming inference, media workers, and workflow
+execution remain subsequent backend layers. See
+[ARCHITECTURE-REPORT.md](ARCHITECTURE-REPORT.md).
 
 ```bash
 project-manager backup /srv/projects/example /srv/backups/example.tar.gz

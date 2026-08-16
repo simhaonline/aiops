@@ -368,7 +368,7 @@ collection-manager restore /srv/backups/example-collections.tar.gz /srv/projects
 
 Inspect or remove its timer with `schedule-status` and `schedule-remove`.
 
-## 9. AiOps dashboard
+## 9. SIMHA Studio and AiOps dashboard
 
 Install from a trusted checkout of this repository:
 
@@ -382,6 +382,18 @@ The manager builds the Next.js and NestJS images, compiles the Go broker with a
 pinned toolchain container, installs the Python telemetry unit, generates the
 internal operation token, and binds all HTTP listeners to loopback. Nginx is the
 only remote entry point.
+
+The native Studio workspace includes text, codebases, PDF/documents, image,
+video, voice, translation, knowledge, workflows, projects, registry, and
+operations surfaces. Registry candidates for skills, agents, MCP servers, and
+plugins are quarantined and never auto-installed. Model routing is delegated to
+LiteLLM with capability-aware, verified-free-first selection and explicit
+fallbacks for Ollama Cloud, NVIDIA NIM, and OpenRouter.
+
+The 1.0.0 dashboard is a UI and capability-contract foundation. Conversation
+storage/streaming, document and media workers, and workflow execution must be
+enabled as separately implemented backend layers. See
+[ARCHITECTURE-REPORT.md](ARCHITECTURE-REPORT.md).
 
 Operational checks:
 

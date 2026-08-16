@@ -1,6 +1,10 @@
 # SIMHA Studio product architecture
 
-SIMHA Studio is a first-party user experience for the AiOps Manager Suite. It does not embed, fork, or ship code from LibreChat, LobeHub, AnythingLLM, Langflow, or Scrapling. Those products informed the problem space only.
+SIMHA Studio is a first-party user experience for the AiOps Manager Suite. It
+does not embed, fork, or ship UI/application code from LibreChat, LobeHub,
+AnythingLLM, or Langflow. Scrapling is used only as the separately pinned,
+restricted collection worker managed by `collection-manager`; it is not the
+Studio UI or application framework.
 
 ## Product surfaces
 

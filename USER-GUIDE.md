@@ -220,18 +220,26 @@ Use only sources you are authorized to collect. Do not collect personal,
 sensitive, authenticated or paywalled content. The administrator-provided
 dashboard URL is read-only and protected by the Nginx edge.
 
-## 9. AiOps dashboard
+## 9. SIMHA Studio and AiOps dashboard
 
 Open the administrator-provided HTTPS URL. The interface follows the operating
 system theme initially and remembers light or dark mode on that browser. Use it
 to review platform health, host load and memory, project inventory, control
 service status, findings, and audited activity.
 
-The initial interface is intentionally observability-first. A visible button
+SIMHA Studio provides native entry surfaces for text, codebases, PDFs and
+documents, images, video, voice, translation, knowledge, workflows, projects,
+registry assets, and operations. It is designed to become the common workspace
+for model- and tool-capable work, while project boundaries remain enforced by
+`project-manager`.
+
+The current release exposes the UI and capability contract. A visible button
 does not bypass CLI safety controls: approved mutations are validated by the
 API and restricted broker, and destructive workflows continue to require
-explicit confirmation. Never paste secrets into search, names, or operation
-arguments.
+explicit confirmation. Conversation persistence, streaming inference, media
+processing, and workflow execution are backend capabilities that must be
+enabled as they are delivered. Never paste secrets into search, names, or
+operation arguments.
 
 ## 10. Goose
 

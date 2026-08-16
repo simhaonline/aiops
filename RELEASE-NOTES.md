@@ -41,6 +41,26 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 - Maintains README, administrator, user, project-isolation, dependency,
   installation, security and release documentation as source Markdown.
 - Removed generated DOCX copies and historical release artifacts.
+- Added `ARCHITECTURE-REPORT.md` covering project scope, module boundaries,
+  request lifecycles, coupling, state models, ADRs, conventions, and Mermaid
+  diagrams.
+- Added native SIMHA Studio product documentation and capability boundaries.
+
+### Native SIMHA Studio
+
+- Added a first-party responsive Studio shell without embedding or forking UI
+  code from LibreChat, LobeHub, AnythingLLM, or Langflow.
+- Added native surfaces for text, codebases, PDF/documents, image, video, voice,
+  translation, knowledge, workflows, projects, registry, and operations.
+- Added the NestJS workspace capability contract for modality actions, registry
+  lifecycle states, LiteLLM routing policy, and safety boundaries.
+- Added quarantine-first governance for discovered skills, agents, MCP servers,
+  and plugins; automatic installation is disabled.
+- Enabled same-origin camera/microphone and blob media policies for future media
+  workflows while retaining the loopback/private deployment boundary.
+- Documented the current boundary: UI/capability foundation first, followed by
+  conversation persistence, streaming, ingestion, media workers, translation,
+  registry collection, and workflow execution layers.
 
 ### Existing fixes retained
 
