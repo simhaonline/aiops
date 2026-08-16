@@ -7,7 +7,7 @@ computing and provides no quantum speedup or hardware acceleration.
 
 Current foundation:
 
-- disabled unless `Q_AI_ENABLED=true`;
+- disabled unless both `Q_AI_ENABLED=true` and `Q_AI_PRODUCTION_ACK=true`;
 - calls the existing LiteLLM loopback gateway, never provider keys directly;
 - validates and normalizes JSON evidence;
 - executes eligible models concurrently with per-call timeouts;

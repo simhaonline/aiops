@@ -15,6 +15,8 @@ is isolated in `algorithms.ts` for deterministic tests.
 The Go broker is deliberately not in this path. Q-AI cannot execute shell
 commands, access Docker, or receive provider secrets. The LiteLLM URL defaults
 to `http://127.0.0.1:4000` and can be changed only through deployment config.
+The generated dashboard deployment keeps both activation flags false; enabling
+production requires explicit operator acknowledgement and a reviewed registry.
 
 ## Current and future boundaries
 

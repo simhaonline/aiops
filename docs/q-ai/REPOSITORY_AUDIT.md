@@ -3,7 +3,7 @@
 **Audit date:** 2026-08-16  
 **Repository:** `simhaonline/aiops`  
 **Baseline:** `main` at `1533f13`  
-**Extension branch:** `feature/q-ai-orchestrator`
+**Extension branch:** temporary review branch, merged and removed after release
 
 ## Executive summary
 
@@ -129,8 +129,7 @@ or a future worker service and must never receive Docker or root credentials.
   learning APIs must be optional and report insufficient data rather than claim
   accuracy.
 - The repository has historically committed directly to `main`; this extension
-  follows the current specification by using `feature/q-ai-orchestrator` until
-  reviewed.
+  was reviewed on a temporary feature branch and merged back to `main`.
 
 ## Recommended extension location
 

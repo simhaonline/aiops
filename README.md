@@ -325,7 +325,10 @@ self-hosted and additive; tenant workloads do not receive access to the host
 broker.
 The feature-flagged Quantum-Inspired Multi-AI Orchestrator (Q-AI) is documented
 in [`docs/q-ai/`](docs/q-ai/). It is classical orchestration above LiteLLM,
-disabled by default, and makes no physical quantum-computing claim.
+disabled by default, and makes no physical quantum-computing claim. Production
+activation requires both `Q_AI_ENABLED=true` and
+`Q_AI_PRODUCTION_ACK=true`, plus a reviewed `Q_AI_MODELS_JSON` registry; see
+[`docs/q-ai/ROLLBACK.md`](docs/q-ai/ROLLBACK.md).
 The current Studio release establishes the UI and capability contract; full
 conversation persistence, streaming inference, media workers, and workflow
 execution remain subsequent backend layers. See

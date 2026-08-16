@@ -205,6 +205,8 @@ Projects use:
 The dashboard has overview and capability JSON models. The platform route shell has mock-safe usage/billing state, while the optional PostgreSQL boundary is defined in `dashboard/database/migrations/001_initial.sql`; it is not yet the live repository for every UI view. LiteLLM stores model configuration under `/etc/litellm/config.yaml`; Ollama Cloud policy is under `/etc/ollama-cloud/ollama.env` and its systemd override.
 Q-AI state is currently in-process and versioned in the response; durable
 request/evidence/outcome persistence is intentionally not enabled yet.
+Production activation is guarded by both `Q_AI_ENABLED` and
+`Q_AI_PRODUCTION_ACK`, with a reviewed `Q_AI_MODELS_JSON` registry.
 
 ### Gotchas
 

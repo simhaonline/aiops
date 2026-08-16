@@ -17,6 +17,8 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 - Q-AI is classical computation inspired by probability amplitudes and
   measurement; it does not claim quantum hardware, quantum advantage, or
   quantum speedup.
+- Production activation requires both `Q_AI_ENABLED=true` and
+  `Q_AI_PRODUCTION_ACK=true`; generated deployments keep both disabled.
 
 ### Platform management portal update
 
