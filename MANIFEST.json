@@ -94,8 +94,8 @@
     },
     "ollama-manager": {
       "version": "1.0.0",
-      "sha256": "441912b9b97b95d4c9264bf815ca0895262285298e2d248f499a664be37d54b7",
-      "size_bytes": 30556
+      "sha256": "d288e9ae7c3f72672551f2331234be727fac84843299d854fb332de40109566e",
+      "size_bytes": 33248
     },
     "opencode-manager": {
       "version": "1.0.0",

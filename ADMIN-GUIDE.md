@@ -74,6 +74,18 @@ sudo system-manager install
 sudo system-manager verify
 ```
 
+After installing Ollama, select only supported Cloud proxy models from the
+managed catalog. This registers Cloud models without downloading their weights:
+
+```bash
+sudo ollama-manager cloud-catalog
+sudo ollama-manager install-cloud
+sudo ollama-manager install-cloud glm-5.2:cloud kimi-k2.7-code:cloud
+```
+
+The interactive installer offers the same selector after runtime setup.
+Non-interactive installations print the follow-up command without blocking.
+
 Install rootless Docker before project environments or Forgejo:
 
 ```bash

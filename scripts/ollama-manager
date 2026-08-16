@@ -28,6 +28,8 @@ umask 027
 #   signin | signout
 #   set-key | clear-key | key-status
 #   cloud-models
+#   cloud-catalog
+#   install-cloud [MODEL...]
 #   register-cloud MODEL
 #   chat MODEL "PROMPT"
 #   test MODEL
@@ -52,6 +54,26 @@ readonly CLOUD_API="${CLOUD_HOST}/api"
 readonly LOG_LINES="${LOG_LINES:-200}"
 readonly CONNECT_TIMEOUT="${OLLAMA_CONNECT_TIMEOUT:-10}"
 readonly DEFAULT_BENCHMARK_RUNS="3"
+readonly -a CLOUD_PROXY_MODELS=(
+  "glm-5.2:cloud"
+  "kimi-k2.6:cloud"
+  "kimi-k2.7-code:cloud"
+  "minimax-m3:cloud"
+  "qwen3.5:cloud"
+  "qwen3.5:397b-cloud"
+  "deepseek-v4-pro:cloud"
+  "deepseek-v4-pro:preview-cloud"
+  "deepseek-v4-flash:0731-cloud"
+  "deepseek-v4-flash:preview-cloud"
+  "gpt-oss:20b-cloud"
+  "gpt-oss:120b-cloud"
+  "mistral-large-3:675b-cloud"
+  "gemma4:cloud"
+  "gemma4:31b-cloud"
+  "nemotron-3-ultra:cloud"
+  "nemotron-3-super:cloud"
+  "nemotron-3-nano:30b-cloud"
+)
 
 log()  { printf '\n==> %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -294,7 +316,13 @@ install_ollama() {
   echo "Next:"
   echo "  sudo ollama-manager set-key        # recommended for direct Cloud API"
   echo "  ollama signin                      # optional for Ollama CLI/local proxy"
+  echo "  sudo ollama-manager install-cloud  # select Cloud-only proxy models"
   echo "  sudo ollama-manager verify"
+
+  if [[ -t 0 && -t 1 ]]; then
+    printf '\n'
+    install_cloud_models
+  fi
 }
 
 update_ollama() {
@@ -531,6 +559,73 @@ cloud_models() {
   printf '\n'
 }
 
+cloud_catalog() {
+  local index
+  echo "Supported Ollama Cloud proxy models:"
+  for index in "${!CLOUD_PROXY_MODELS[@]}"; do
+    printf '  %2d) %s\n' "$((index + 1))" "${CLOUD_PROXY_MODELS[$index]}"
+  done
+}
+
+is_cloud_proxy_model() {
+  local requested="$1" model
+  for model in "${CLOUD_PROXY_MODELS[@]}"; do
+    [[ "$requested" == "$model" ]] && return 0
+  done
+  return 1
+}
+
+pull_cloud_model() {
+  local model="$1"
+  is_cloud_proxy_model "$model" \
+    || die "Refusing model outside the approved Cloud catalog: $model"
+
+  log "Registering Cloud model with the localhost proxy: $model"
+  ollama pull "$model"
+  info "Cloud model registered: $model (weights remain on Ollama Cloud)."
+}
+
+install_cloud_models() {
+  local -a requested=()
+  local selection="" item index
+
+  require_cmd ollama
+  service_exists || die "ollama.service is not installed."
+  systemctl is-active --quiet ollama.service || die "ollama.service is not active."
+
+  if (($#)); then
+    requested=("$@")
+  else
+    cloud_catalog
+    printf '\nChoose model numbers/names separated by commas, "all", or Enter to skip: '
+    IFS= read -r selection
+    [[ -n "$selection" ]] || { info "Cloud model installation skipped."; return 0; }
+
+    if [[ "$selection" == all ]]; then
+      requested=("${CLOUD_PROXY_MODELS[@]}")
+    else
+      local -a choices=()
+      IFS=',' read -r -a choices <<<"$selection"
+      for item in "${choices[@]}"; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        if [[ "$item" =~ ^[0-9]+$ ]]; then
+          index=$((item - 1))
+          ((index >= 0 && index < ${#CLOUD_PROXY_MODELS[@]})) \
+            || die "Cloud model selection is out of range: $item"
+          requested+=("${CLOUD_PROXY_MODELS[$index]}")
+        else
+          requested+=("$item")
+        fi
+      done
+    fi
+  fi
+
+  for item in "${requested[@]}"; do
+    pull_cloud_model "$item"
+  done
+}
+
 signin_ollama() {
   require_cmd ollama
   ollama signin
@@ -548,14 +643,7 @@ register_cloud_model() {
   service_exists || die "ollama.service is not installed."
   systemctl is-active --quiet ollama.service || die "ollama.service is not active."
 
-  case "$model" in
-    *:cloud|*-cloud) ;;
-    *) warn "Cloud proxy model names normally include ':cloud' or a '-cloud' suffix." ;;
-  esac
-
-  log "Registering Cloud model with the localhost proxy: $model"
-  ollama pull "$model"
-  info "Cloud model registered. Model weights remain on Ollama Cloud."
+  pull_cloud_model "$model"
 }
 
 build_chat_payload() {
@@ -944,7 +1032,9 @@ Authentication:
 
 Cloud operations:
   cloud-models              List models exposed by Ollama Cloud API
-  register-cloud MODEL      Register a :cloud model with localhost Ollama proxy
+  cloud-catalog             List approved Cloud-only localhost proxy models
+  install-cloud [MODEL...]  Select or install one or more approved Cloud models
+  register-cloud MODEL      Register one approved Cloud model (compatibility alias)
   chat MODEL "PROMPT"       Stream directly from https://ollama.com/api
   test MODEL                Direct Cloud inference + network/performance metrics
   benchmark MODEL [RUNS]    Compare Cloud TTFB/total time/token throughput (max 20)
@@ -957,6 +1047,8 @@ Examples:
   sudo ./ollama-manager install
   sudo ollama-manager set-key
   sudo ollama-manager cloud-models
+  sudo ollama-manager cloud-catalog
+  sudo ollama-manager install-cloud glm-5.2:cloud kimi-k2.7-code:cloud
   sudo ollama-manager test kimi-k2.6
   sudo ollama-manager benchmark kimi-k2.6 3
   sudo ollama-manager chat kimi-k2.6 "Explain this error briefly"
@@ -1005,6 +1097,8 @@ main() {
     clear-key) clear_key ;;
     key-status) key_status ;;
     cloud-models) cloud_models ;;
+    cloud-catalog) cloud_catalog ;;
+    install-cloud) shift; install_cloud_models "$@" ;;
     register-cloud) shift; register_cloud_model "${1:-}" ;;
     chat) shift; direct_chat "${1:-}" "${@:2}" ;;
     test) shift; test_cloud "${1:-}" ;;
