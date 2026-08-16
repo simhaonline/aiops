@@ -13,7 +13,7 @@ The maintained manager scripts are in `scripts/`. The files in `legacy/` are sup
 The supported one-line bootstrap is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/simhaonline/Simha-AiOps/refs/heads/main/install.sh | bash
 ```
 
 This command:
