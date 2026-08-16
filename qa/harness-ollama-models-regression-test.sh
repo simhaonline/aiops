@@ -5,7 +5,6 @@ IFS=$'\n\t'
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/scripts/harness-manager"
-LEGACY="$ROOT/legacy/harness-manager.sh"
 
 run_parser_suite(){
   local target="$1"
@@ -102,6 +101,5 @@ JSON
 }
 
 run_parser_suite "$SCRIPT"
-run_parser_suite "$LEGACY"
 
 echo 'HARNESS OLLAMA MODEL DISCOVERY REGRESSION: PASS'

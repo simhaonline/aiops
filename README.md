@@ -12,7 +12,8 @@ Operational documentation:
 - [User Operations Guide](USER-GUIDE.md)
 - [Project Isolation Guide](PROJECT-ISOLATION.md)
 
-The maintained manager scripts are in `scripts/`. The files in `legacy/` are support snapshots only and are **never executed automatically**.
+The maintained manager scripts are in `scripts/`; no historical manager copies
+are shipped in the production repository.
 
 ## Quick install
 
@@ -33,8 +34,7 @@ This command:
 7. backs up existing canonical manager commands;
 8. installs 16 managers to `/usr/local/bin`;
 9. installs `wireguard-manager` to `/usr/local/sbin`;
-10. skips `legacy/` by default so support snapshots can never block a normal installation;
-11. writes an installer log under `/var/log/simha-aiops/`.
+10. writes an installer log under `/var/log/simha-aiops/`.
 
 **The bootstrap installs manager scripts only. It does not automatically install, repair, start, restart, update, or purge the managed runtimes.**
 
@@ -284,12 +284,6 @@ Or install selected manager commands:
 sudo bash ./install-canonical-managers.sh system-manager docker-manager nvm-manager
 ```
 
-Legacy support snapshots are intentionally skipped by default. To validate and copy them read-only:
-
-```bash
-sudo AIOPS_INSTALL_LEGACY=1 bash ./install-canonical-managers.sh all
-```
-
 ## Logs and backups
 
 The one-line bootstrap stores its log under:
@@ -304,7 +298,8 @@ Previous canonical manager scripts are backed up under:
 /var/backups/simha-aiops/manager-scripts/<UTC timestamp>/
 ```
 
-Individual managers may maintain their own logs, state directories, and backups. See the manager reference documents in `docs/`.
+Individual managers maintain their own logs, state directories, and backups.
+See the administrator, user, and project-isolation Markdown guides.
 
 ## Security model
 
@@ -319,7 +314,6 @@ Key suite rules:
 - Credentials/configuration files use restricted permissions where the manager owns them.
 - Repair operations are intended to be idempotent and non-destructive.
 - The suite does not silently accept third-party legal Terms of Service.
-- `legacy/` files are reference material, not trusted current executables.
 
 ## Nginx edge policy
 
@@ -346,43 +340,24 @@ The maintained Miniconda manager:
 - keeps `base` auto-activation disabled;
 - provides managed interactive Bash integration so `conda activate ENV` works without per-user `conda init`.
 
-## Legacy support directory
-
-The repository keeps:
-
-```text
-legacy/
-```
-
-for migration/rollback reference. These files are not canonical managers and are not placed on executable PATH. They are **not copied by the normal bootstrap**. If explicitly requested with `AIOPS_INSTALL_LEGACY=1`, they are copied read-only to:
-
-```text
-/usr/local/share/simha-aiops/legacy/
-```
-
-Do not execute a legacy manager in production without reviewing the older behavior first.
-
 ## Repository layout
 
 ```text
 .
-├── .github/workflows/validate.yml
 ├── scripts/                 # 20 maintained executable managers
-├── legacy/                  # non-executable support snapshots
-├── docs/                    # 19 current reference documents
 ├── qa/                      # release validation/regression checks
 ├── README.md
-├── ABOUT.md
+├── ADMIN-GUIDE.md
+├── USER-GUIDE.md
+├── PROJECT-ISOLATION.md
 ├── DEPENDENCIES.md
 ├── INSTALLATION-ORDER.md
 ├── SECURITY.md
 ├── RELEASE-NOTES.md
 ├── MANIFEST.json
-├── QA-REPORT.txt
 ├── SHA256SUMS.txt
 ├── install.sh
-├── install-canonical-managers.sh
-└── sync-github-repo.sh
+└── install-canonical-managers.sh
 ```
 
 ## Release validation
@@ -402,7 +377,6 @@ The release gate checks:
 - canonical installer `--check`;
 - checksums;
 - repository inventory;
-- DOCX package integrity;
 - Docker fresh-install regression;
 - system-manager regression;
 - absence of private keys and obvious credential material.
@@ -443,11 +417,11 @@ freebuff-manager runtime-check
 
 ## Release finalization
 
-The `docs/` directory is release-managed and must contain exactly 19 canonical DOCX references.
-If historical generations remain after an older manual upload, clean and rebuild the release metadata with:
+Regenerate release metadata and run the full validation gate with:
 
 ```bash
 bash qa/finalize-release.sh
 ```
 
-The finalizer runs `qa/cleanup-docs.sh`, removes only non-canonical `docs/*.docx` files, verifies all 19 required documents remain, then regenerates `MANIFEST.json` and `SHA256SUMS.txt` before running the complete release validator.
+The finalizer regenerates `MANIFEST.json` and `SHA256SUMS.txt` from the current
+minimal repository before running the complete release validator.

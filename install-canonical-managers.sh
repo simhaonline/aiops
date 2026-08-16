@@ -34,11 +34,9 @@ log(){ printf '[INFO] %s\n' "$*"; }
 
 BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${BASE}/scripts"
-LEGACY_SRC="${BASE}/legacy"
 CHECKSUM_FILE="${BASE}/SHA256SUMS.txt"
 
 CHECK_ONLY=no
-INSTALL_LEGACY="${AIOPS_INSTALL_LEGACY:-0}"
 
 usage(){
   cat <<EOF
@@ -48,9 +46,6 @@ Usage:
   bash ./install-canonical-managers.sh --check
   sudo bash ./install-canonical-managers.sh all
   sudo bash ./install-canonical-managers.sh MANAGER [MANAGER...]
-
-Environment:
-  AIOPS_INSTALL_LEGACY=1   validate/copy read-only legacy support snapshots
 
 Install mode copies manager SCRIPT files only. It never installs, repairs,
 starts, restarts, updates or purges managed runtimes/services.
@@ -109,36 +104,6 @@ verify_source(){
   fi
 }
 
-verify_legacy_sources(){
-  [[ -d "$LEGACY_SRC" ]] || die "Missing legacy support directory."
-  [[ -f "$LEGACY_SRC/README.md" ]] || die "Missing legacy/README.md."
-
-  local count f rel expected actual
-  count="$(find "$LEGACY_SRC" -maxdepth 1 -type f -name '*.sh' | wc -l)"
-  [[ "$count" -eq 17 ]] || die "Expected 17 legacy support scripts; found $count."
-
-  while IFS= read -r -d '' f; do
-    bash -n "$f" || die "Syntax validation failed: ${f#$BASE/}"
-    grep -Fq 'readonly AIOPS_LEGACY_RELEASE="1.0.1"' "$f" || \
-      die "Legacy support release marker missing: ${f#$BASE/}"
-
-    if [[ -f "$CHECKSUM_FILE" ]]; then
-      rel="${f#$BASE/}"
-      expected="$(awk -v p="$rel" '$2==p {print $1}' "$CHECKSUM_FILE" | head -n1)"
-      [[ -n "$expected" ]] || die "Checksum entry missing: $rel"
-      actual="$(sha256sum "$f" | awk '{print $1}')"
-      [[ "$actual" == "$expected" ]] || die "Checksum mismatch: $rel"
-    fi
-  done < <(find "$LEGACY_SRC" -maxdepth 1 -type f -name '*.sh' -print0 | sort -z)
-
-  if [[ -f "$CHECKSUM_FILE" ]]; then
-    expected="$(awk '$2=="legacy/README.md" {print $1}' "$CHECKSUM_FILE" | head -n1)"
-    [[ -n "$expected" ]] || die "Checksum entry missing: legacy/README.md"
-    actual="$(sha256sum "$LEGACY_SRC/README.md" | awk '{print $1}')"
-    [[ "$actual" == "$expected" ]] || die "Checksum mismatch: legacy/README.md"
-  fi
-}
-
 backup_existing(){
   local src="$1" backup_root="$2" target
   [[ -e "$src" || -L "$src" ]] || return 0
@@ -163,20 +128,6 @@ install_one(){
   fi
 
   log "Installed $name -> $dest"
-}
-
-install_legacy(){
-  [[ "$INSTALL_LEGACY" != 0 ]] || return 0
-  local dst="/usr/local/share/simha-aiops/legacy"
-  install -d -o root -g root -m 0755 "$dst"
-  find "$dst" -mindepth 1 -maxdepth 1 -type f -delete 2>/dev/null || true
-
-  local f
-  while IFS= read -r -d '' f; do
-    install -o root -g root -m 0644 "$f" "$dst/$(basename "$f")"
-  done < <(find "$LEGACY_SRC" -maxdepth 1 -type f -print0 | sort -z)
-
-  log "Installed read-only legacy support snapshots -> $dst"
 }
 
 main(){
@@ -210,13 +161,8 @@ main(){
     verify_source "$manager"
   done
 
-  if [[ "$INSTALL_LEGACY" != 0 ]]; then
-    verify_legacy_sources
-  fi
-
   if [[ "$CHECK_ONLY" == yes ]]; then
     log "Release check passed: ${#selected[@]} maintained managers, version ${RELEASE_VERSION}."
-    [[ "$INSTALL_LEGACY" == 0 ]] || log "Legacy support validation passed."
     exit 0
   fi
 
@@ -239,8 +185,6 @@ main(){
   for manager in "${selected[@]}"; do
     install_one "$manager"
   done
-
-  install_legacy
 
   log "Manager-script backup: $backup_root"
   log "Canonical manager installation complete."

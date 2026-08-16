@@ -18,6 +18,7 @@ Checksums protect against accidental corruption or inconsistent payloads. They a
 
 Keep application backends on loopback whenever supported. Use `nginx-manager` as the intended public TLS edge.
 
-## Legacy files
+## Repository scope
 
-`legacy/` is not executable production code. It is retained only for migration/rollback analysis.
+Only maintained executable managers, active QA, installer files, release
+metadata, and current Markdown operations documentation are published.

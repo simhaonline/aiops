@@ -8,15 +8,12 @@ cd "$(dirname "$0")/.."
 
 readonly RELEASE_VERSION="1.0.1"
 readonly EXPECTED_MANAGERS=20
-readonly EXPECTED_LEGACY=17
-readonly EXPECTED_DOCS=19
 
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 pass(){ printf '[PASS] %s\n' "$*"; }
 
 required_root=(
   README.md
-  ABOUT.md
   DEPENDENCIES.md
   INSTALLATION-ORDER.md
   SECURITY.md
@@ -25,11 +22,9 @@ required_root=(
   USER-GUIDE.md
   PROJECT-ISOLATION.md
   MANIFEST.json
-  QA-REPORT.txt
   SHA256SUMS.txt
   install.sh
   install-canonical-managers.sh
-  sync-github-repo.sh
 )
 
 for f in "${required_root[@]}"; do
@@ -37,33 +32,16 @@ for f in "${required_root[@]}"; do
 done
 pass "Required release files"
 
-if [[ -f .github/workflows/validate.yml ]]; then
-  pass "GitHub Actions workflow present"
-else
-  printf '[WARN] GitHub Actions workflow is absent; runtime/release validation continues.\n'
-fi
-
 manager_count="$(find scripts -maxdepth 1 -type f | wc -l)"
 [[ "$manager_count" -eq "$EXPECTED_MANAGERS" ]] || \
   die "Expected $EXPECTED_MANAGERS maintained manager scripts; found $manager_count."
 pass "20 maintained manager scripts"
 
-legacy_count="$(find legacy -maxdepth 1 -type f -name '*.sh' | wc -l)"
-[[ "$legacy_count" -eq "$EXPECTED_LEGACY" ]] || \
-  die "Expected $EXPECTED_LEGACY legacy support scripts; found $legacy_count."
-[[ -f legacy/README.md ]] || die "legacy/README.md missing."
-pass "17 legacy support scripts"
-
-doc_count="$(find docs -maxdepth 1 -type f -name '*.docx' | wc -l)"
-[[ "$doc_count" -eq "$EXPECTED_DOCS" ]] || \
-  die "Expected $EXPECTED_DOCS DOCX references; found $doc_count."
-pass "19 canonical DOCX references"
-
-# Shell syntax: maintained, support, bootstrap, sync and QA.
-for f in install.sh install-canonical-managers.sh sync-github-repo.sh scripts/* legacy/*.sh qa/*.sh; do
+# Shell syntax: maintained managers, bootstrap and QA.
+for f in install.sh install-canonical-managers.sh scripts/* qa/*.sh; do
   bash -n "$f" || die "bash -n failed: $f"
 done
-pass "Bash syntax for maintained/support/release scripts"
+pass "Bash syntax for maintained managers, installers and QA"
 
 # Manager help must be read-only and callable without a runtime installation.
 for f in scripts/*; do
@@ -85,17 +63,8 @@ for name in scripts/*; do
 done
 pass "Unified maintained-manager version 1.0.1"
 
-# Legacy scripts retain historical internal manager versions but belong to this
-# support bundle release and are never installed on PATH.
-for f in legacy/*.sh; do
-  grep -Fq 'readonly AIOPS_LEGACY_RELEASE="1.0.1"' "$f" || \
-    die "Legacy support release marker missing: $f"
-done
-pass "Legacy support bundle release 1.0.1"
-
 grep -Fq 'readonly INSTALLER_VERSION="1.0.1"' install.sh || die "install.sh version mismatch."
 grep -Fq 'readonly INSTALLER_VERSION="1.0.1"' install-canonical-managers.sh || die "canonical installer version mismatch."
-grep -Fq 'readonly SYNC_VERSION="1.0.1"' sync-github-repo.sh || die "sync helper version mismatch."
 for f in qa/*.sh; do
   grep -Fq 'readonly AIOPS_SCRIPT_VERSION="1.0.1"' "$f" || die "QA script version mismatch: $f"
 done
@@ -154,10 +123,6 @@ pass "Core security policy gates"
 bash install-canonical-managers.sh --check >/dev/null
 pass "Canonical installer --check"
 
-# Release QA additionally validates every optional legacy support snapshot.
-AIOPS_INSTALL_LEGACY=1 bash install-canonical-managers.sh --check >/dev/null
-pass "Optional legacy support validation"
-
 # Release checksums are authoritative for files fetched by install.sh and for
 # the published repository inventory.
 sha256sum -c SHA256SUMS.txt >/dev/null
@@ -166,14 +131,12 @@ pass "SHA256SUMS verification"
 # Manifest metadata must agree with canonical files.
 python3 - <<'PY'
 from pathlib import Path
-import hashlib, json, zipfile
+import hashlib, json
 
 root=Path(".")
 m=json.loads((root/"MANIFEST.json").read_text())
 assert m["release"]=="1.0.1"
 assert len(m["managers"])==20
-assert len(m["legacy_support"])==17
-assert len(m["documents"])==19
 
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -185,30 +148,9 @@ for name, meta in m["managers"].items():
     assert meta["sha256"]==sha(p), name
     assert meta["size_bytes"]==p.stat().st_size, name
 
-for name, meta in m["legacy_support"].items():
-    p=root/"legacy"/name
-    assert p.is_file(), name
-    assert meta["release"]=="1.0.1", name
-    assert meta["sha256"]==sha(p), name
-
-for item in m["documents"]:
-    p=root/"docs"/item["name"]
-    assert p.is_file()
-    assert item["sha256"]==sha(p)
-    with zipfile.ZipFile(p) as z:
-        bad=z.testzip()
-        assert bad is None, (p,bad)
-        names=set(z.namelist())
-        assert "[Content_Types].xml" in names
-        assert "word/document.xml" in names
-        # No model/build-machine path is allowed inside DOCX XML.
-        for member in [n for n in z.namelist() if n.endswith(".xml")]:
-            data=z.read(member)
-            assert b"/mnt/data/" not in data, (p,member)
-            assert b"/tmp/aiops-" not in data, (p,member)
-print("manifest/docx integrity OK")
+print("manifest integrity OK")
 PY
-pass "Manifest and DOCX package/build-path integrity"
+pass "Manifest integrity"
 
 qa/docker-manager-regression-test.sh >/dev/null
 pass "Docker fresh-install regression"
@@ -272,7 +214,6 @@ cat ./install.sh | env \
   PATH="$tmp/bin:$PATH" \
   AIOPS_TEST_REPO_ROOT="$PWD" \
   AIOPS_DRY_RUN=1 \
-  AIOPS_INSTALL_LEGACY=0 \
   bash >/dev/null
 
 rm -rf "$tmp"
@@ -292,12 +233,12 @@ if grep -RIn --exclude='validate-release.sh' --exclude='SHA256SUMS.txt' --exclud
 fi
 pass "Credential-pattern scan"
 
-# Plain-text build path scan; DOCX XML is checked above.
+# Plain-text build path scan.
 if grep -RIn --exclude='validate-release.sh' --exclude='SHA256SUMS.txt' --exclude-dir='.git' \
     -E '/mnt/data/|/tmp/aiops-' \
-    README.md ABOUT.md DEPENDENCIES.md INSTALLATION-ORDER.md SECURITY.md RELEASE-NOTES.md \
+    README.md DEPENDENCIES.md INSTALLATION-ORDER.md SECURITY.md RELEASE-NOTES.md \
     ADMIN-GUIDE.md USER-GUIDE.md PROJECT-ISOLATION.md \
-    scripts legacy qa install.sh install-canonical-managers.sh sync-github-repo.sh 2>/dev/null | grep -q .; then
+    scripts qa install.sh install-canonical-managers.sh 2>/dev/null | grep -q .; then
   die "Build-machine path leaked into release text/scripts."
 fi
 pass "Build-path scan"

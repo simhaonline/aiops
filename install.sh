@@ -10,7 +10,6 @@ REPOSITORY="${AIOPS_REPOSITORY:-simhaonline/aiops}"
 REF="${AIOPS_REF:-main}"
 REQUIRE_PIN="${AIOPS_REQUIRE_PIN:-0}"
 DRY_RUN="${AIOPS_DRY_RUN:-0}"
-INSTALL_LEGACY="${AIOPS_INSTALL_LEGACY:-0}"
 
 readonly MANAGERS=(
   system-manager
@@ -93,7 +92,6 @@ validate_inputs(){
   [[ "$REF" != *".."* ]] || die "AIOPS_REF may not contain '..'."
   [[ "$REQUIRE_PIN" =~ ^[01]$ ]] || die "AIOPS_REQUIRE_PIN must be 0 or 1."
   [[ "$DRY_RUN" =~ ^[01]$ ]] || die "AIOPS_DRY_RUN must be 0 or 1."
-  [[ "$INSTALL_LEGACY" =~ ^[01]$ ]] || die "AIOPS_INSTALL_LEGACY must be 0 or 1."
   if [[ "$REQUIRE_PIN" == 1 && "$REF" == main ]]; then
     die "AIOPS_REQUIRE_PIN=1 requires AIOPS_REF to be a tag or commit, not main."
   fi
@@ -175,11 +173,6 @@ main(){
   say "Requested:  ${REF}"
   say "Commit:     ${RESOLVED_REF}"
   say "Mode:       manager scripts only"
-  if [[ "$INSTALL_LEGACY" == 0 ]]; then
-    say "Legacy:     skipped (optional support snapshots)"
-  else
-    say "Legacy:     validate/copy read-only support snapshots"
-  fi
   if [[ "$DRY_RUN" == 1 ]]; then
     say "Dry run:    download/verification only"
   fi
@@ -191,10 +184,6 @@ main(){
   bash -n "$TMP_DIR/install-canonical-managers.sh"
 
   install -d -m 0755 "$TMP_DIR/scripts"
-  if [[ "$INSTALL_LEGACY" != 0 ]]; then
-    install -d -m 0755 "$TMP_DIR/legacy"
-  fi
-
   local name
   for name in "${MANAGERS[@]}"; do
     fetch "scripts/${name}" "$TMP_DIR/scripts/${name}"
@@ -205,23 +194,9 @@ main(){
     version_check "$name" "$TMP_DIR/scripts/${name}"
   done
 
-  if [[ "$INSTALL_LEGACY" != 0 ]]; then
-    fetch "legacy/README.md" "$TMP_DIR/legacy/README.md"
-    verify_download "legacy/README.md" "$TMP_DIR/legacy/README.md"
-    for name in "${MANAGERS[@]}"; do
-      fetch "legacy/${name}.sh" "$TMP_DIR/legacy/${name}.sh"
-      verify_download "legacy/${name}.sh" "$TMP_DIR/legacy/${name}.sh"
-      bash -n "$TMP_DIR/legacy/${name}.sh" || die "Legacy syntax validation failed: $name"
-      grep -Fq 'readonly AIOPS_LEGACY_RELEASE="1.0.1"' "$TMP_DIR/legacy/${name}.sh" || \
-        die "Legacy support snapshot is not marked for release 1.0.1: $name"
-      chmod 0644 "$TMP_DIR/legacy/${name}.sh"
-    done
-  fi
-
   (
     cd "$TMP_DIR"
-    AIOPS_INSTALL_LEGACY="$INSTALL_LEGACY" \
-      bash ./install-canonical-managers.sh --check
+    bash ./install-canonical-managers.sh --check
   )
 
   if [[ "$DRY_RUN" == 1 ]]; then
@@ -231,8 +206,7 @@ main(){
 
   (
     cd "$TMP_DIR"
-    as_root env AIOPS_INSTALL_LEGACY="$INSTALL_LEGACY" \
-      bash ./install-canonical-managers.sh all
+    as_root bash ./install-canonical-managers.sh all
   )
 
   say "Installed all 20 canonical manager commands."
