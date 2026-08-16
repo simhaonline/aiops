@@ -4,6 +4,7 @@ import { OverviewController } from "./overview.controller";
 import { OperationsController } from "./operations.controller";
 import { PlatformService } from "./platform.service";
 import { WorkspaceController } from "./workspace.controller";
+import { DatabaseService } from "./database.service";
 
-@Module({controllers:[HealthController,OverviewController,OperationsController,WorkspaceController],providers:[PlatformService]})
+@Module({controllers:[HealthController,OverviewController,OperationsController,WorkspaceController],providers:[PlatformService,DatabaseService],exports:[DatabaseService]})
 export class AppModule {}

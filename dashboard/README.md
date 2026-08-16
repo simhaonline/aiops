@@ -23,6 +23,12 @@ validation. Project start/stop is deliberately excluded because project Compose
 files are user-editable and must never be executed by the root broker. It does
 not implement arbitrary commands or an interactive shell.
 
+For SaaS deployments, PostgreSQL is the system of record, pgvector stores
+embeddings, and TimescaleDB stores usage and telemetry. The tenant-isolated
+schema and migration guidance are in [`database/`](database/). Set
+`AIOPS_DATABASE_URL` for persistence; local/read-only installations may leave
+it unset.
+
 ## Development
 
 ```bash

@@ -317,6 +317,12 @@ and backup, and collection crawl/verification). It deliberately does not start
 or stop user-editable project Compose files through the privileged broker.
 Requests validate direct `/srv/projects` targets, time out execution, truncate
 output, and write a JSON audit record.
+For SaaS deployments, PostgreSQL is the system of record, pgvector stores
+embeddings, and TimescaleDB stores time-series usage and telemetry. The
+tenant-isolated schema and migration guidance are in
+[`dashboard/database/`](dashboard/database/). Existing CLI managers remain
+self-hosted and additive; tenant workloads do not receive access to the host
+broker.
 The current Studio release establishes the UI and capability contract; full
 conversation persistence, streaming inference, media workers, and workflow
 execution remain subsequent backend layers. See

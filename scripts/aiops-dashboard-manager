@@ -70,6 +70,9 @@ services:
       AIOPS_BROKER_SOCKET: /run/aiops-dashboard/broker.sock
       AIOPS_TELEMETRY_URL: http://127.0.0.1:9108
       AIOPS_PROJECTS_ROOT: /srv/projects
+      AIOPS_DATABASE_URL: "\${AIOPS_DATABASE_URL:-}"
+      AIOPS_DATABASE_SSL: "\${AIOPS_DATABASE_SSL:-require}"
+      AIOPS_DATABASE_POOL_MAX: "\${AIOPS_DATABASE_POOL_MAX:-10}"
     network_mode: host
     group_add:
       - "\${AIOPS_DASHBOARD_GID}"

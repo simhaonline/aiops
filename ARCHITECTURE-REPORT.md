@@ -3,6 +3,11 @@
 **Release:** 1.0.0  
 **Repository:** `simhaonline/aiops`
 
+The SaaS persistence direction is captured in
+[`SAAS-ARCHITECTURE.md`](SAAS-ARCHITECTURE.md). PostgreSQL, pgvector, and
+TimescaleDB are an additive data boundary; existing CLI managers remain
+self-hosted and are not exposed to tenant workloads.
+
 ## 1. Core purpose and users
 
 SIMHA AiOps is a production-oriented operations control plane for installing, configuring, verifying, and lifecycle-managing an AI development and inference server. It keeps host, AI runtime, provider gateway, project isolation, collection, networking, and dashboard concerns in separate managers instead of one unrestricted installer or administrative API.
@@ -271,4 +276,3 @@ graph TD
     AM -->|Yes| AN([Non-zero exit])
     AM -->|No| AO([Success])
 ```
-
