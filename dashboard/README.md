@@ -43,6 +43,14 @@ These views are currently mock-backed. Authentication, live usage aggregation,
 payment providers, API-key storage, and billing actions must be connected to
 the authenticated SaaS API before production use.
 
+## Q-AI orchestration
+
+The optional Q-AI module is documented in [`../docs/q-ai/`](../docs/q-ai/).
+It is disabled by default, calls the existing LiteLLM loopback gateway, and
+uses classical quantum-inspired probability/interference terminology without
+claiming physical quantum computing. Enable it only after configuring an
+authenticated internal deployment and a reviewed `Q_AI_MODELS_JSON` registry.
+
 ## Development
 
 ```bash

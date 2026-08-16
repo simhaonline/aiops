@@ -5,6 +5,7 @@ import { OperationsController } from "./operations.controller";
 import { PlatformService } from "./platform.service";
 import { WorkspaceController } from "./workspace.controller";
 import { DatabaseService } from "./database.service";
+import { QAIModule } from "./q-ai/q-ai.module";
 
-@Module({controllers:[HealthController,OverviewController,OperationsController,WorkspaceController],providers:[PlatformService,DatabaseService],exports:[DatabaseService]})
+@Module({imports:[QAIModule],controllers:[HealthController,OverviewController,OperationsController,WorkspaceController],providers:[PlatformService,DatabaseService],exports:[DatabaseService]})
 export class AppModule {}

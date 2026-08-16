@@ -6,7 +6,7 @@
   "scripts": {
     "build": "npm run build -w @aiops/web && npm run build -w @aiops/api",
     "dev": "npm run dev -w @aiops/web",
-    "test": "npm run test -w @aiops/api && (cd broker && GOCACHE=/tmp/aiops-dashboard-go-cache go test ./...) && python3 -m unittest discover telemetry/tests"
+    "test": "npm run build -w @aiops/api && npm run test -w @aiops/api && (cd broker && GOCACHE=/tmp/aiops-dashboard-go-cache go test ./...) && python3 -m unittest discover telemetry/tests"
   },
   "engines": {"node": ">=22"}
 }

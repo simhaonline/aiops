@@ -4,6 +4,20 @@
 
 All maintained executable manager scripts now use manager version `1.0.0`.
 
+### Q-AI orchestration foundation
+
+- Added a disabled-by-default, vendor-neutral Quantum-Inspired Multi-AI
+  Orchestrator above the existing LiteLLM gateway.
+- Added provider-neutral model registry configuration, bounded parallel calls,
+  timeout/partial-failure isolation, JSON evidence normalization,
+  correlation-adjusted weighting, classical interference, Bayesian-inspired
+  fusion, confidence/stability measurement, and algorithm version metadata.
+- Added deterministic Q-AI unit tests and documentation covering formulas,
+  security, observability, testing, rollout, rollback, and repository fit.
+- Q-AI is classical computation inspired by probability amplitudes and
+  measurement; it does not claim quantum hardware, quantum advantage, or
+  quantum speedup.
+
 ### Platform management portal update
 
 - Added a responsive SIMHA Online platform-management shell with organization

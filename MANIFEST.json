@@ -9,8 +9,8 @@
     },
     "aiops-dashboard-manager": {
       "version": "1.0.0",
-      "sha256": "ee05093bf84ea6880778d01547541461ba4cacb424c31ce27dcb8134583ba8d5",
-      "size_bytes": 11140
+      "sha256": "4ae4f07982f0eb480f7258876b5b166bf14888903b49836553981db3f75dd51b",
+      "size_bytes": 11351
     },
     "claude-manager": {
       "version": "1.0.0",
