@@ -12,6 +12,29 @@ Operational documentation:
 - [User Operations Guide](USER-GUIDE.md)
 - [Project Isolation Guide](PROJECT-ISOLATION.md)
 - [Architecture, Lifecycle, and Context Report](ARCHITECTURE-REPORT.md)
+- [Third-Party Notices and Attributions](THIRD-PARTY-NOTICES.md)
+
+## Copyright, trademarks, and third-party credits
+
+SIMHA AiOps source code and original documentation are Copyright (c) 2026
+Simha.Online and are provided under the MIT License in `LICENSE`.
+
+This repository integrates with, builds around, or can invoke external projects
+and services including Next.js, React, NestJS, Fastify, TypeScript, Node.js, Go,
+Python, Docker, Nginx, Certbot, WireGuard, Forgejo, LiteLLM, Ollama, NVIDIA NIM,
+OpenRouter, Scrapling, and Goose. Their names and links are listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Each remains governed by its
+own license and terms; this repository does not transfer ownership or relicense
+third-party code.
+
+All trademarks, service marks, trade names, product names, logos, and brands
+mentioned in this repository are the property of their respective owners. Their
+use is for identification, interoperability, documentation, or compatibility
+only and does not imply endorsement, sponsorship, affiliation, or ownership.
+
+LibreChat, LobeHub, AnythingLLM, and Langflow informed product research only;
+their application code is not bundled or forked in SIMHA Studio. Scrapling is
+used as a separately pinned collection worker, as documented in the notices.
 
 The maintained manager scripts are in `scripts/`; no historical manager copies
 are shipped in the production repository.
