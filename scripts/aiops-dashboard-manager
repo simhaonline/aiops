@@ -73,6 +73,11 @@ services:
       AIOPS_DATABASE_URL: "\${AIOPS_DATABASE_URL:-}"
       AIOPS_DATABASE_SSL: "\${AIOPS_DATABASE_SSL:-require}"
       AIOPS_DATABASE_POOL_MAX: "\${AIOPS_DATABASE_POOL_MAX:-10}"
+      Q_AI_ENABLED: "\${Q_AI_ENABLED:-false}"
+      Q_AI_PRODUCTION_ACK: "\${Q_AI_PRODUCTION_ACK:-false}"
+      Q_AI_SHADOW: "\${Q_AI_SHADOW:-false}"
+      Q_AI_MODELS_JSON: "\${Q_AI_MODELS_JSON:-[]}"
+      Q_AI_GATEWAY_URL: "\${Q_AI_GATEWAY_URL:-http://127.0.0.1:4000}"
     network_mode: host
     group_add:
       - "\${AIOPS_DASHBOARD_GID}"

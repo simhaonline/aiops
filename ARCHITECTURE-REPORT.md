@@ -49,6 +49,7 @@ Forgejo optionally uses PostgreSQL. The core suite has no central application da
 | `dashboard/apps/web` | Next.js/React Studio interface, platform-management routes, theme system, and proxy routes |
 | `dashboard/apps/api` | NestJS controllers, platform service, and optional PostgreSQL pool/health boundary |
 | `dashboard/database` | PostgreSQL/pgvector/TimescaleDB migration and tenant RLS policy |
+| `dashboard/apps/api/src/q-ai` | Feature-flagged LiteLLM orchestration, evidence fusion, and measurement |
 | `dashboard/broker` | Go Unix-socket privileged operation broker |
 | `dashboard/telemetry` | Python telemetry collector |
 | `qa/` | Release, security, regression, and manager tests |
@@ -202,6 +203,8 @@ Projects use:
 ```
 
 The dashboard has overview and capability JSON models. The platform route shell has mock-safe usage/billing state, while the optional PostgreSQL boundary is defined in `dashboard/database/migrations/001_initial.sql`; it is not yet the live repository for every UI view. LiteLLM stores model configuration under `/etc/litellm/config.yaml`; Ollama Cloud policy is under `/etc/ollama-cloud/ollama.env` and its systemd override.
+Q-AI state is currently in-process and versioned in the response; durable
+request/evidence/outcome persistence is intentionally not enabled yet.
 
 ### Gotchas
 

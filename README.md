@@ -323,6 +323,9 @@ tenant-isolated schema and migration guidance are in
 [`dashboard/database/`](dashboard/database/). Existing CLI managers remain
 self-hosted and additive; tenant workloads do not receive access to the host
 broker.
+The feature-flagged Quantum-Inspired Multi-AI Orchestrator (Q-AI) is documented
+in [`docs/q-ai/`](docs/q-ai/). It is classical orchestration above LiteLLM,
+disabled by default, and makes no physical quantum-computing claim.
 The current Studio release establishes the UI and capability contract; full
 conversation persistence, streaming inference, media workers, and workflow
 execution remain subsequent backend layers. See

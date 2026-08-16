@@ -35,6 +35,13 @@ grep -Fq 'Topped-up balance' dashboard/apps/web/app/ui/platform-dashboard.tsx
 grep -Fq 'All dates and times are shown in GMT+4' dashboard/apps/web/app/ui/platform-dashboard.tsx
 grep -Fq 'Export CSV' dashboard/apps/web/app/ui/platform-dashboard.tsx
 grep -Fq 'PlatformRoute' 'dashboard/apps/web/app/[...segments]/page.tsx'
+grep -Fq 'Q_AI_ENABLED' dashboard/apps/api/src/q-ai/q-ai.config.ts
+grep -Fq 'Q-AI is disabled' dashboard/apps/api/src/q-ai/q-ai.controller.ts
+grep -Fq 'Promise.all' dashboard/apps/api/src/q-ai/orchestrator.service.ts
+grep -Fq 'bayesianFusion' dashboard/apps/api/src/q-ai/algorithms.ts
+grep -Fq 'interference' dashboard/apps/api/src/q-ai/algorithms.ts
+grep -Fq 'correlation' dashboard/apps/api/src/q-ai/algorithms.ts
+grep -Fq 'sqrt' dashboard/apps/api/src/q-ai/algorithms.ts
 
 grep -Fq 'operation is not allowlisted' dashboard/broker/main.go
 grep -Fq 'project symlink escapes /srv/projects' dashboard/broker/main.go

@@ -22,3 +22,7 @@ Every application transaction must set `SET LOCAL app.tenant_id = '<uuid>'`.
 Row-level security policies intentionally return no rows when tenant context is
 missing. Large media remains in tenant-scoped object storage; only metadata and
 content hashes belong in PostgreSQL.
+
+Q-AI request/evidence persistence is not enabled by this migration. The Q-AI
+module currently returns versioned decision metadata in-process; durable
+outcomes and calibration data require authenticated tenant transactions first.

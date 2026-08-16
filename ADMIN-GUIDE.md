@@ -401,6 +401,15 @@ empty-state views. Do not treat displayed balances or invoices as authoritative
 until authentication, tenant context, payment integration, and usage
 repositories are connected to the SaaS API.
 
+### Q-AI orchestration (disabled by default)
+
+Q-AI is an internal, token-protected API module above LiteLLM. Keep
+`Q_AI_ENABLED=false` until the model registry, tenant authentication, provider
+data policy, and outcome storage have been reviewed. Configuration is passed to
+the dashboard API through `Q_AI_MODELS_JSON`; see [`docs/q-ai/README.md`](docs/q-ai/README.md).
+Disabling the flag and restarting the dashboard immediately restores the
+existing behavior.
+
 Operational checks:
 
 ```bash
