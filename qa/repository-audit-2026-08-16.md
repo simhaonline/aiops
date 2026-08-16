@@ -5,7 +5,7 @@ This audit records the release-normalization work performed before the final
 
 ## Canonical source layout
 
-- `scripts/`: exactly 17 maintained manager commands.
+- `scripts/`: exactly 20 maintained manager commands.
 - `legacy/`: exactly 17 non-executable support snapshots plus `README.md`.
 - `docs/`: exactly 19 current DOCX references.
 - `qa/`: release validation and the two regression tests.
@@ -14,7 +14,7 @@ This audit records the release-normalization work performed before the final
 
 ## Corrected release blockers
 
-- The one-line bootstrap now downloads and verifies all 17 maintained managers.
+- The one-line bootstrap now downloads and verifies all 20 maintained managers.
 - Canonical manager destinations are `/usr/local/bin`, except
   `wireguard-manager` at `/usr/local/sbin`.
 - Old duplicate-path manager scripts are backed up before cleanup.

@@ -1,0 +1,451 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+
+readonly MANAGER_VERSION="1.0.1"
+readonly MANAGED_DIR=".aiops"
+readonly COMPOSE_REL="${MANAGED_DIR}/compose.yaml"
+readonly ENV_REL="${MANAGED_DIR}/project.env"
+readonly DOCKERFILE_REL="${MANAGED_DIR}/container/Dockerfile"
+readonly FEATURE_REL="${MANAGED_DIR}/features"
+readonly SECRET_REL="${MANAGED_DIR}/secrets"
+
+die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+info(){ printf '[INFO] %s\n' "$*"; }
+
+require_command(){ command -v "$1" >/dev/null 2>&1 || die "Required command missing: $1"; }
+
+canonical_existing_dir(){
+  [[ -d "$1" ]] || die "Directory does not exist: $1"
+  (cd -- "$1" && pwd -P)
+}
+
+project_root(){
+  local start="${1:-$PWD}" current
+  current="$(canonical_existing_dir "$start")"
+  while [[ "$current" != / ]]; do
+    if [[ -f "$current/$ENV_REL" && -f "$current/$COMPOSE_REL" ]]; then
+      printf '%s\n' "$current"
+      return 0
+    fi
+    current="$(dirname "$current")"
+  done
+  die "No managed project found. Run 'project-manager init PATH'."
+}
+
+validate_name(){
+  [[ "$1" =~ ^[a-z][a-z0-9_-]{0,47}$ ]] || \
+    die "Project name must start with a lowercase letter and contain only lowercase letters, numbers, _ or -."
+}
+
+default_name(){
+  local value
+  value="$(basename "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
+  value="${value#-}"; value="${value%-}"
+  [[ "$value" =~ ^[a-z] ]] || value="project-${value:-dev}"
+  printf '%.48s\n' "$value"
+}
+
+compose(){
+  local root="$1" feature_file args=(); shift
+  require_command docker
+  args+=(--project-directory "$root" --env-file "$root/$ENV_REL" -f "$root/$COMPOSE_REL")
+  if [[ -f "$root/$SECRET_REL/code-server.env" ]]; then
+    args=(--project-directory "$root" --env-file "$root/$ENV_REL" --env-file "$root/$SECRET_REL/code-server.env" -f "$root/$COMPOSE_REL")
+  fi
+  if [[ -d "$root/$FEATURE_REL" ]]; then
+    while IFS= read -r feature_file; do args+=(-f "$feature_file"); done \
+      < <(find "$root/$FEATURE_REL" -maxdepth 1 -type f -name '*.yaml' | sort)
+  fi
+  docker compose "${args[@]}" "$@"
+}
+
+write_templates(){
+  local root="$1" name="$2" uid gid
+  uid="${AIOPS_PROJECT_UID:-$(id -u)}"; gid="${AIOPS_PROJECT_GID:-$(id -g)}"
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || die "Project UID/GID must be numeric."
+  if [[ "$uid" == 0 ]]; then uid=10000; fi
+  if [[ "$gid" == 0 ]]; then gid=10000; fi
+  install -d -m 0700 \
+    "$root/$MANAGED_DIR/container" \
+    "$root/$MANAGED_DIR/home/.codex/skills" \
+    "$root/$MANAGED_DIR/home/.codex/plugins" \
+    "$root/$MANAGED_DIR/home/.config" \
+    "$root/$FEATURE_REL" \
+    "$root/$SECRET_REL" \
+    "$root/$MANAGED_DIR/backups"
+
+  cat >"$root/$ENV_REL" <<EOF
+AIOPS_PROJECT_NAME=$name
+AIOPS_UID=$uid
+AIOPS_GID=$gid
+AIOPS_BASE_IMAGE=ubuntu:24.04
+AIOPS_PACKAGES=ca-certificates curl git jq build-essential python3 python3-venv python3-pip nodejs npm golang-go
+AIOPS_CODE_SERVER_PORT=8080
+EOF
+
+  cat >"$root/$DOCKERFILE_REL" <<'EOF'
+ARG AIOPS_BASE_IMAGE=ubuntu:24.04
+FROM ${AIOPS_BASE_IMAGE}
+ARG DEBIAN_FRONTEND=noninteractive
+ARG AIOPS_UID=1000
+ARG AIOPS_GID=1000
+ARG AIOPS_PACKAGES="ca-certificates curl git jq build-essential python3 python3-venv python3-pip nodejs npm golang-go"
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ${AIOPS_PACKAGES} \
+ && rm -rf /var/lib/apt/lists/* \
+ && (getent group "${AIOPS_GID}" >/dev/null || groupadd --gid "${AIOPS_GID}" developer) \
+ && (getent passwd "${AIOPS_UID}" >/dev/null || useradd --uid "${AIOPS_UID}" --gid "${AIOPS_GID}" --shell /bin/bash developer) \
+ && install -d -o "${AIOPS_UID}" -g "${AIOPS_GID}" -m 0700 /home/developer
+USER ${AIOPS_UID}:${AIOPS_GID}
+ENV HOME=/home/developer
+ENV CODEX_HOME=/home/developer/.codex
+ENV PATH=/home/developer/.local/bin:/home/developer/.local/share/npm/bin:${PATH}
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+EOF
+
+  cat >"$root/$COMPOSE_REL" <<'EOF'
+services:
+  workspace:
+    build:
+      context: .
+      dockerfile: .aiops/container/Dockerfile
+      args:
+        AIOPS_BASE_IMAGE: ${AIOPS_BASE_IMAGE}
+        AIOPS_UID: ${AIOPS_UID}
+        AIOPS_GID: ${AIOPS_GID}
+        AIOPS_PACKAGES: ${AIOPS_PACKAGES}
+    init: true
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+    environment:
+      HOME: /home/developer
+      CODEX_HOME: /home/developer/.codex
+      AIOPS_PROJECT_NAME: ${AIOPS_PROJECT_NAME}
+    env_file:
+      - path: ./.aiops/secrets/runtime.env
+        required: false
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+      - type: bind
+        source: ./.aiops/home
+        target: /home/developer
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - project
+networks:
+  project:
+    name: aiops-${AIOPS_PROJECT_NAME}
+EOF
+
+  if [[ ! -f "$root/AGENTS.md" ]]; then
+    cat >"$root/AGENTS.md" <<EOF
+# Project instructions: $name
+
+This file applies only to this project. Document its architecture, commands,
+quality gates, security boundaries, and agent-specific working agreements here.
+
+Project-local Codex state lives under \`.aiops/home/.codex/\`, including its
+configuration, MCP definitions, skills, and plugins. Do not point these paths at
+another project or at a host-global configuration directory.
+EOF
+  fi
+
+  if [[ ! -f "$root/.gitignore" ]]; then
+    cat >"$root/.gitignore" <<'EOF'
+.aiops/home/
+.aiops/backups/
+.env
+EOF
+  else
+    for entry in '.aiops/home/' '.aiops/backups/'; do
+      grep -Fxq "$entry" "$root/.gitignore" || printf '%s\n' "$entry" >>"$root/.gitignore"
+    done
+  fi
+
+  chmod 0600 "$root/$ENV_REL"
+  : >"$root/$SECRET_REL/runtime.env"
+  chmod 0600 "$root/$SECRET_REL/runtime.env"
+  chmod 0644 "$root/$COMPOSE_REL" "$root/$DOCKERFILE_REL"
+}
+
+feature_enabled(){ [[ -f "$1/$FEATURE_REL/$2.enabled" ]]; }
+
+feature_enable(){
+  local root feature password
+  root="$(project_root "${1:-$PWD}")"; feature="${2:-}"
+  case "$feature" in
+    code-server)
+      require_command openssl
+      password="$(openssl rand -hex 24)"
+      cat >"$root/$FEATURE_REL/code-server.yaml" <<'EOF'
+services:
+  code-server:
+    image: codercom/code-server:4.130.0
+    user: "${AIOPS_UID}:${AIOPS_GID}"
+    working_dir: /workspace
+    environment:
+      HOME: /home/coder
+      PASSWORD: ${AIOPS_CODE_SERVER_PASSWORD}
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+      - type: bind
+        source: ./.aiops/home
+        target: /home/coder
+    ports:
+      - "127.0.0.1:${AIOPS_CODE_SERVER_PORT}:8080"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - project
+EOF
+      printf 'AIOPS_CODE_SERVER_PASSWORD=%s\n' "$password" >"$root/$SECRET_REL/code-server.env"
+      chmod 0600 "$root/$SECRET_REL/code-server.env"
+      ;;
+    goose)
+      install -d -m 0700 "$root/$MANAGED_DIR/home/.config/goose"
+      ;;
+    opencodex)
+      install -d -m 0700 "$root/$MANAGED_DIR/home/.opencodex"
+      ;;
+    mulerouter)
+      info "Set its project-specific credential with: project-manager secret-set '$root' mulerouter"
+      ;;
+    *) die "Supported features: code-server | goose | opencodex | mulerouter" ;;
+  esac
+  : >"$root/$FEATURE_REL/$feature.enabled"; chmod 0600 "$root/$FEATURE_REL/$feature.enabled"
+  info "Enabled project feature: $feature"
+}
+
+feature_disable(){
+  local root feature
+  root="$(project_root "${1:-$PWD}")"; feature="${2:-}"
+  case "$feature" in
+    code-server) compose "$root" rm -sf code-server 2>/dev/null || true; rm -f -- "$root/$FEATURE_REL/code-server.yaml" ;;
+    goose|opencodex|mulerouter) ;;
+    *) die "Unknown feature: $feature" ;;
+  esac
+  rm -f -- "$root/$FEATURE_REL/$feature.enabled"
+  info "Disabled feature definition; its project-local state was preserved."
+}
+
+feature_list(){
+  local root feature
+  root="$(project_root "${1:-$PWD}")"
+  for feature in code-server goose opencodex mulerouter; do
+    if feature_enabled "$root" "$feature"; then printf '%-14s enabled\n' "$feature"; else printf '%-14s disabled\n' "$feature"; fi
+  done
+}
+
+tool_install(){
+  local root feature
+  root="$(project_root "${1:-$PWD}")"; feature="${2:-}"
+  feature_enabled "$root" "$feature" || die "Enable '$feature' first."
+  compose "$root" up -d workspace
+  case "$feature" in
+    goose)
+      compose "$root" exec workspace bash -lc \
+        'set -Eeuo pipefail; f=$(mktemp); trap '\''rm -f "$f"'\'' EXIT; curl -fsSL --proto "=https" --tlsv1.2 https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh -o "$f"; bash "$f"'
+      ;;
+    opencodex)
+      compose "$root" exec workspace bash -lc \
+        'set -Eeuo pipefail; npm config set prefix "$HOME/.local/share/npm"; npm install --global @bitkyc08/opencodex'
+      ;;
+    *) die "No workspace tool installation is required for: $feature" ;;
+  esac
+  info "Installed $feature inside this project's isolated home."
+}
+
+secret_set(){
+  local root provider value key tmp
+  root="$(project_root "${1:-$PWD}")"; provider="${2:-}"
+  case "$provider" in mulerouter) key=MULEROUTER_API_KEY ;; *) die "Supported secret provider: mulerouter" ;; esac
+  if [[ -n "${AIOPS_SECRET_VALUE:-}" ]]; then value="$AIOPS_SECRET_VALUE"; else
+    read -r -s -p "$key: " value; printf '\n'
+  fi
+  [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || die "Secret must use only letters, numbers, dot, underscore or hyphen."
+  tmp="$root/$SECRET_REL/runtime.env.tmp"
+  grep -v "^${key}=" "$root/$SECRET_REL/runtime.env" >"$tmp" || true
+  printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$root/$SECRET_REL/runtime.env"; chmod 0600 "$root/$SECRET_REL/runtime.env"
+  unset value
+  info "Stored $provider credential in the project-only runtime secret file."
+}
+
+init_project(){
+  local requested="${1:-}" name="${2:-}" root
+  [[ -n "$requested" ]] || die "Usage: project-manager init PATH [NAME]"
+  install -d -m 0755 "$requested"
+  root="$(canonical_existing_dir "$requested")"
+  [[ ! -e "$root/$MANAGED_DIR" ]] || die "Already initialized: $root"
+  name="${name:-$(default_name "$root")}"; validate_name "$name"
+  write_templates "$root" "$name"
+  info "Initialized isolated project '$name' at $root"
+  info "Edit $root/$ENV_REL and $root/$DOCKERFILE_REL for project runtimes, then run: project-manager build $root"
+}
+
+verify_project(){
+  local root name
+  root="$(project_root "${1:-$PWD}")"
+  name="$(awk -F= '$1=="AIOPS_PROJECT_NAME" {print substr($0, index($0,"=")+1); exit}' "$root/$ENV_REL")"
+  validate_name "$name"
+  [[ -d "$root/$MANAGED_DIR/home/.codex/skills" ]] || die "Project-local skills directory missing."
+  [[ -d "$root/$MANAGED_DIR/home/.codex/plugins" ]] || die "Project-local plugins directory missing."
+  [[ -f "$root/AGENTS.md" ]] || die "Project AGENTS.md missing."
+  grep -Fq 'source: ./.aiops/home' "$root/$COMPOSE_REL" || die "Isolated home mount missing."
+  ! grep -Eq '(/var/run/docker.sock|/root/\.codex|\$\{HOME\}/\.codex)' "$root/$COMPOSE_REL" || \
+    die "Unsafe host-global mount found in compose.yaml."
+  compose "$root" config --quiet
+  info "Project isolation verified: $root"
+}
+
+backup_project(){
+  local root output parent base stamp
+  root="$(project_root "${1:-$PWD}")"
+  output="${2:-}"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"; base="$(basename "$root")"; parent="$(dirname "$root")"
+  [[ -n "$output" ]] || output="$root/$MANAGED_DIR/backups/${base}-${stamp}.tar.gz"
+  [[ "$output" == /* ]] || output="$PWD/$output"
+  install -d -m 0700 "$(dirname "$output")"
+  case "$output" in
+    "$root/$MANAGED_DIR/backups"/*) ;;
+    "$root"/*) die "A backup inside the project must be stored under $root/$MANAGED_DIR/backups." ;;
+  esac
+  require_command tar; require_command sha256sum
+  tar --exclude="./$base/$MANAGED_DIR/backups" -C "$parent" -czf "$output" "./$base"
+  chmod 0600 "$output"
+  sha256sum "$output" >"${output}.sha256"; chmod 0600 "${output}.sha256"
+  info "Backup created: $output"
+  info "Checksum: ${output}.sha256"
+}
+
+validate_archive(){
+  local archive="$1" entry
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    [[ "$entry" != /* ]] || die "Archive contains an absolute path: $entry"
+    [[ "/$entry/" != *"/../"* ]] || die "Archive contains path traversal: $entry"
+  done < <(tar -tzf "$archive")
+}
+
+restore_project(){
+  local archive="${1:-}" destination="${2:-}" tmp top
+  [[ -f "$archive" ]] || die "Backup archive not found: $archive"
+  [[ -n "$destination" ]] || die "Usage: project-manager restore ARCHIVE DESTINATION"
+  require_command tar
+  if [[ -f "${archive}.sha256" ]]; then
+    require_command sha256sum
+    (cd -- "$(dirname "$archive")" && sha256sum -c "$(basename "${archive}.sha256")")
+  fi
+  validate_archive "$archive"
+  if [[ -e "$destination" ]]; then
+    [[ -d "$destination" && -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]] || \
+      die "Restore destination must be absent or empty: $destination"
+  else
+    install -d -m 0755 "$destination"
+  fi
+  tmp="$(mktemp -d "$(dirname "$(canonical_existing_dir "$destination")")/.aiops-restore.XXXXXX")"
+  trap 'rm -rf -- "$tmp"' RETURN
+  tar -xzf "$archive" -C "$tmp" --no-same-owner
+  top="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  [[ -n "$top" && -f "$top/$ENV_REL" ]] || die "Archive is not a project-manager backup."
+  cp -a -- "$top"/. "$destination"/
+  trap - RETURN; rm -rf -- "$tmp"
+  info "Project restored to: $(canonical_existing_dir "$destination")"
+  info "Run 'project-manager verify $destination' before starting it."
+}
+
+destroy_project(){
+  local root confirm="${2:-}"
+  root="$(project_root "${1:-$PWD}")"
+  [[ "$confirm" == --yes ]] || die "Destructive operation. Re-run: project-manager destroy '$root' --yes"
+  compose "$root" down --remove-orphans
+  rm -rf -- "$root/$MANAGED_DIR"
+  info "Removed project containers and isolated state. Source files were preserved."
+}
+
+help(){
+  cat <<EOF
+project-manager $MANAGER_VERSION
+
+Create one containerized development environment per project. Each project has
+its own HOME, CODEX_HOME, skills, plugins, MCP configuration, agent state,
+dependencies, Compose network, and source mount.
+
+Lifecycle:
+  init PATH [NAME]          Create an isolated project definition
+  build [PATH]              Build its workspace image
+  up [PATH]                 Build and start it
+  down [PATH]               Stop and remove its containers
+  shell [PATH]              Open a shell as the unprivileged developer
+  run [PATH] -- COMMAND...  Run a command in the workspace
+  status [PATH]             Show container status
+  verify [PATH]             Validate isolation and Compose configuration
+
+Protection:
+  backup [PATH] [FILE]      Back up source plus isolated configuration/state
+  restore ARCHIVE PATH      Restore into an absent or empty directory
+  destroy [PATH] --yes      Remove containers and .aiops state; preserve source
+
+Project features:
+  features [PATH]
+  feature-enable PATH NAME  code-server | goose | opencodex | mulerouter
+  feature-disable PATH NAME Preserve feature state while disabling it
+  tool-install PATH NAME    Install enabled Goose/OpenCodex in isolated HOME
+  secret-set PATH NAME      Prompt for a project-specific provider credential
+
+The host Docker socket and host AI-tool configuration are never mounted.
+
+Initialization maps the calling user's UID/GID. When invoked by root it uses
+the unprivileged 10000:10000 identity; override with AIOPS_PROJECT_UID and
+AIOPS_PROJECT_GID when a different mapping is required.
+EOF
+}
+
+main(){
+  local command="${1:-help}" root
+  shift || true
+  case "$command" in
+    init) init_project "${1:-}" "${2:-}" ;;
+    build) root="$(project_root "${1:-$PWD}")"; compose "$root" build ;;
+    up|start) root="$(project_root "${1:-$PWD}")"; compose "$root" up -d --build ;;
+    down|stop) root="$(project_root "${1:-$PWD}")"; compose "$root" down --remove-orphans ;;
+    shell) root="$(project_root "${1:-$PWD}")"; compose "$root" exec workspace bash ;;
+    run)
+      if [[ "${1:-}" == -- ]]; then
+        root="$(project_root "$PWD")"; shift
+      else
+        root="$(project_root "${1:-$PWD}")"; shift || true
+        [[ "${1:-}" == -- ]] && shift
+      fi
+      (($#)) || die "run requires a command after '--'."
+      compose "$root" exec workspace "$@"
+      ;;
+    status) root="$(project_root "${1:-$PWD}")"; compose "$root" ps ;;
+    features) feature_list "${1:-$PWD}" ;;
+    feature-enable) feature_enable "${1:-$PWD}" "${2:-}" ;;
+    feature-disable) feature_disable "${1:-$PWD}" "${2:-}" ;;
+    tool-install) tool_install "${1:-$PWD}" "${2:-}" ;;
+    secret-set) secret_set "${1:-$PWD}" "${2:-}" ;;
+    verify) verify_project "${1:-$PWD}" ;;
+    backup) backup_project "${1:-$PWD}" "${2:-}" ;;
+    restore) restore_project "${1:-}" "${2:-}" ;;
+    destroy) destroy_project "${1:-$PWD}" "${2:-}" ;;
+    version) echo "project-manager $MANAGER_VERSION" ;;
+    help|-h|--help) help ;;
+    *) help >&2; die "Unknown command: $command" ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

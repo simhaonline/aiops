@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+
+readonly MANAGER_VERSION="1.0.1"
+readonly ROOTLESS_USER="${FORGEJO_DOCKER_USER:-docker-rootless}"
+readonly STACK_DIR="${FORGEJO_STACK_DIR:-/var/lib/docker-rootless/forgejo-stack}"
+readonly COMPOSE_FILE="$STACK_DIR/compose.yaml"
+readonly ENV_FILE="$STACK_DIR/forgejo.env"
+readonly BACKUP_DIR="$STACK_DIR/backups"
+readonly FORGEJO_IMAGE="${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:16.0.1-rootless}"
+readonly POSTGRES_IMAGE="${FORGEJO_POSTGRES_IMAGE:-postgres:17.5-alpine}"
+
+die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+info(){ printf '[INFO] %s\n' "$*"; }
+require_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root."; }
+require_command(){ command -v "$1" >/dev/null 2>&1 || die "Required command missing: $1"; }
+uid(){ id -u "$ROOTLESS_USER"; }
+
+rootless_docker(){
+  local user_uid
+  id "$ROOTLESS_USER" >/dev/null 2>&1 || die "Rootless Docker account missing: $ROOTLESS_USER"
+  user_uid="$(uid)"
+  [[ -S "/run/user/$user_uid/docker.sock" ]] || die "Rootless Docker socket is unavailable. Run docker-manager install/repair."
+  runuser -u "$ROOTLESS_USER" -- env HOME="$(getent passwd "$ROOTLESS_USER" | cut -d: -f6)" \
+    XDG_RUNTIME_DIR="/run/user/$user_uid" DOCKER_HOST="unix:///run/user/$user_uid/docker.sock" \
+    PATH="/usr/local/bin:/usr/bin:/bin" docker "$@"
+}
+
+compose(){ rootless_docker compose --project-directory "$STACK_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"; }
+
+require_stack(){ [[ -s "$COMPOSE_FILE" && -s "$ENV_FILE" ]] || die "Forgejo stack is not initialized."; }
+
+install_stack(){
+  require_root; require_command openssl
+  id "$ROOTLESS_USER" >/dev/null 2>&1 || die "Install rootless Docker first with docker-manager."
+  [[ ! -e "$COMPOSE_FILE" ]] || die "Forgejo is already initialized. Use repair or update."
+  install -d -o "$ROOTLESS_USER" -g "$ROOTLESS_USER" -m 0700 "$STACK_DIR" "$BACKUP_DIR"
+  local db_password secret
+  db_password="$(openssl rand -hex 32)"; secret="$(openssl rand -hex 32)"
+  cat >"$ENV_FILE" <<EOF
+FORGEJO_IMAGE=$FORGEJO_IMAGE
+FORGEJO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+FORGEJO_HTTP_BIND=127.0.0.1
+FORGEJO_HTTP_PORT=3000
+FORGEJO_SSH_BIND=127.0.0.1
+FORGEJO_SSH_PORT=2222
+FORGEJO_DB_PASSWORD=$db_password
+FORGEJO_INTERNAL_TOKEN=$secret
+EOF
+  cat >"$COMPOSE_FILE" <<'EOF'
+services:
+  db:
+    image: ${FORGEJO_POSTGRES_IMAGE}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: forgejo
+      POSTGRES_USER: forgejo
+      POSTGRES_PASSWORD: ${FORGEJO_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgejo -d forgejo"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  forgejo:
+    image: ${FORGEJO_IMAGE}
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: db:5432
+      FORGEJO__database__NAME: forgejo
+      FORGEJO__database__USER: forgejo
+      FORGEJO__database__PASSWD: ${FORGEJO_DB_PASSWORD}
+      FORGEJO__server__HTTP_ADDR: 0.0.0.0
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__SSH_PORT: ${FORGEJO_SSH_PORT}
+      FORGEJO__server__START_SSH_SERVER: "true"
+      FORGEJO__server__SSH_LISTEN_PORT: "2222"
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__repository__IMPORT_LOCAL_PATHS: "false"
+      FORGEJO__security__INTERNAL_TOKEN: ${FORGEJO_INTERNAL_TOKEN}
+      FORGEJO__actions__ENABLED: "true"
+      FORGEJO__actions__DEFAULT_ACTIONS_URL: https://data.forgejo.org
+    volumes:
+      - forgejo-data:/var/lib/gitea
+    ports:
+      - "${FORGEJO_HTTP_BIND}:${FORGEJO_HTTP_PORT}:3000"
+      - "${FORGEJO_SSH_BIND}:${FORGEJO_SSH_PORT}:2222"
+    networks: [frontend, backend]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+networks:
+  frontend: {}
+  backend:
+    internal: true
+volumes:
+  forgejo-data:
+    name: aiops-forgejo-data
+  postgres-data:
+    name: aiops-forgejo-postgres
+EOF
+  chown "$ROOTLESS_USER:$ROOTLESS_USER" "$ENV_FILE" "$COMPOSE_FILE"
+  chmod 0600 "$ENV_FILE"; chmod 0644 "$COMPOSE_FILE"
+  compose config --quiet
+  info "Forgejo initialized. Review $ENV_FILE, then run forgejo-manager start."
+}
+
+start(){ require_root; require_stack; compose up -d; }
+stop(){ require_root; require_stack; compose down; }
+restart(){ stop; start; }
+status(){ require_root; require_stack; compose ps; }
+logs(){ require_root; require_stack; compose logs --tail "${1:-200}" forgejo db; }
+verify(){
+  require_root; require_stack
+  compose config --quiet
+  rootless_docker info --format '{{json .SecurityOptions}}' | grep -Fq rootless || die "Forgejo is not using a rootless Docker daemon."
+  compose ps --status running --services | grep -Fxq forgejo || die "Forgejo container is not running."
+  compose ps --status running --services | grep -Fxq db || die "PostgreSQL container is not running."
+  local bind port
+  bind="$(awk -F= '$1=="FORGEJO_HTTP_BIND"{print $2}' "$ENV_FILE")"
+  port="$(awk -F= '$1=="FORGEJO_HTTP_PORT"{print $2}' "$ENV_FILE")"
+  [[ "$bind" == 127.0.0.1 || "$bind" == ::1 ]] || die "Forgejo HTTP must remain loopback-only behind the TLS edge."
+  curl -fsS --max-time 10 "http://127.0.0.1:$port/api/healthz" >/dev/null
+  info "FORGEJO: VERIFIED"
+}
+
+volume_backup(){
+  local volume="$1" output="$2"
+  rootless_docker run --rm -v "$volume:/source:ro" alpine:3.22 \
+    tar -C /source -czf - . >"$output"
+}
+
+backup(){
+  require_root; require_stack; require_command sha256sum
+  local output="${1:-$BACKUP_DIR/forgejo-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}" tmp was_running=no
+  [[ "$output" == /* ]] || die "Backup path must be absolute."
+  install -d -m 0700 "$(dirname "$output")"
+  compose ps --status running --services | grep -Fxq forgejo && was_running=yes || true
+  compose down
+  tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' RETURN
+  install -m 0600 "$ENV_FILE" "$tmp/forgejo.env"; install -m 0644 "$COMPOSE_FILE" "$tmp/compose.yaml"
+  volume_backup aiops-forgejo-data "$tmp/forgejo-data.tar.gz"
+  volume_backup aiops-forgejo-postgres "$tmp/postgres-data.tar.gz"
+  tar -C "$tmp" -czf "$output" .; chmod 0600 "$output"
+  sha256sum "$output" >"$output.sha256"; chmod 0600 "$output.sha256"
+  [[ "$was_running" == yes ]] && compose up -d
+  trap - RETURN; rm -rf -- "$tmp"
+  info "Consistent Forgejo backup: $output"
+}
+
+restore_volume(){
+  local volume="$1" archive="$2"
+  rootless_docker volume create "$volume" >/dev/null
+  rootless_docker run --rm -i -v "$volume:/target" alpine:3.22 \
+    sh -c 'find /target -mindepth 1 -delete; tar -C /target -xzf -' <"$archive"
+}
+
+restore(){
+  require_root; local archive="${1:-}" confirm="${2:-}" tmp
+  [[ -f "$archive" ]] || die "Backup not found: $archive"
+  [[ "$confirm" == --yes ]] || die "Restore replaces Forgejo state. Re-run with --yes."
+  [[ -f "$archive.sha256" ]] && (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive.sha256")")
+  tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' RETURN
+  tar -tzf "$archive" | grep -Eq '(^|/)\.\./|^/' && die "Unsafe archive paths." || true
+  tar -xzf "$archive" -C "$tmp"
+  [[ -s "$tmp/compose.yaml" && -s "$tmp/forgejo.env" ]] || die "Invalid Forgejo backup."
+  if [[ -s "$COMPOSE_FILE" ]]; then compose down || true; fi
+  install -d -o "$ROOTLESS_USER" -g "$ROOTLESS_USER" -m 0700 "$STACK_DIR" "$BACKUP_DIR"
+  install -o "$ROOTLESS_USER" -g "$ROOTLESS_USER" -m 0644 "$tmp/compose.yaml" "$COMPOSE_FILE"
+  install -o "$ROOTLESS_USER" -g "$ROOTLESS_USER" -m 0600 "$tmp/forgejo.env" "$ENV_FILE"
+  restore_volume aiops-forgejo-data "$tmp/forgejo-data.tar.gz"
+  restore_volume aiops-forgejo-postgres "$tmp/postgres-data.tar.gz"
+  compose up -d
+  trap - RETURN; rm -rf -- "$tmp"
+  info "Forgejo restored; run verify and perform an application-level smoke test."
+}
+
+update(){ require_root; require_stack; backup; compose pull; compose up -d; verify; }
+version(){ echo "forgejo-manager $MANAGER_VERSION"; require_stack 2>/dev/null && compose images 2>/dev/null || true; }
+help(){ cat <<EOF
+forgejo-manager $MANAGER_VERSION
+Rootless Forgejo + PostgreSQL infrastructure manager.
+
+Lifecycle: install | start | stop | restart | update | status | verify | logs [N]
+Protection: backup [ABSOLUTE_FILE] | restore FILE --yes
+
+HTTP and SSH default to loopback. Publish HTTPS through nginx-manager. The
+stack uses the docker-manager rootless daemon and never uses rootful Docker.
+Forgejo Runner is deliberately managed separately because workflows execute
+untrusted code.
+EOF
+}
+
+case "${1:-help}" in
+  install) install_stack ;; start) start ;; stop) stop ;; restart) restart ;; update) update ;;
+  status) status ;; verify) verify ;; logs) logs "${2:-200}" ;; backup) backup "${2:-}" ;;
+  restore) restore "${2:-}" "${3:-}" ;; version) version ;; help|-h|--help) help ;;
+  *) help; exit 2 ;;
+esac

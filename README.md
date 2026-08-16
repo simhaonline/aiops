@@ -6,6 +6,12 @@
 
 Simha AiOps is a production-oriented collection of lifecycle managers for operating an AI development/inference server without mixing every runtime into one monolithic installer.
 
+Operational documentation:
+
+- [Administrator Operations Guide](ADMIN-GUIDE.md)
+- [User Operations Guide](USER-GUIDE.md)
+- [Project Isolation Guide](PROJECT-ISOLATION.md)
+
 The maintained manager scripts are in `scripts/`. The files in `legacy/` are support snapshots only and are **never executed automatically**.
 
 ## Quick install
@@ -21,7 +27,7 @@ This command:
 1. requires Ubuntu 24.04 LTS for install mode;
 2. resolves `main` (or the requested tag) to one immutable Git commit before downloading the release payload;
 3. downloads `SHA256SUMS.txt` from that exact commit;
-4. downloads all **17** maintained manager scripts from the same commit;
+4. downloads all **20** maintained manager scripts from the same commit;
 5. verifies every downloaded manager against the checksum manifest;
 6. runs Bash syntax, `help`, and version checks;
 7. backs up existing canonical manager commands;
@@ -57,6 +63,8 @@ curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh \
 |---|---:|---|---|
 | `system-manager` | 1.0.1 | Ubuntu base security/packages/SSH/UFW/limits/time | Ubuntu 24.04 |
 | `docker-manager` | 1.0.1 | Host Docker + managed rootless Docker | system baseline recommended |
+| `forgejo-manager` | 1.0.1 | Rootless Forgejo + PostgreSQL, backup and restore | **requires rootless Docker** |
+| `forgejo-runner-manager` | 1.0.1 | Dedicated rootless Podman Actions runner | separate VM recommended |
 | `gvm-manager` | 1.0.1 | Root-scoped GVM/Go | system baseline recommended |
 | `miniconda-manager` | 1.0.1 | System-wide Miniconda | system baseline recommended |
 | `nvm-manager` | 1.0.1 | Root NVM/Node/PM2 | system baseline recommended |
@@ -71,6 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh \
 | `freebuff-manager` | 1.0.1 | Freebuff CLI lifecycle | **requires `nvm-manager`** |
 | `litellm-manager` | 1.0.1 | LiteLLM Proxy lifecycle | Python/venv/build baseline |
 | `llmrouter-manager` | 1.0.1 | LMRouter CLI/API lifecycle | **requires `nvm-manager`** |
+| `project-manager` | 1.0.1 | Isolated per-project development, backup and restore | **requires Docker Compose** |
 | `manager-suite` | 1.0.1 | Cross-manager inventory/status/verification | none |
 
 Runtime/upstream application versions are independent from the manager suite version. For example, `nvm-manager 1.0.1` can manage a newer Node release without changing the manager's own version.
@@ -85,29 +94,32 @@ Phase 1 - Base OS
 
 Phase 2 - Core runtimes
   2. docker-manager
-  3. gvm-manager
-  4. miniconda-manager
-  5. nvm-manager
+  3. forgejo-manager (optional)
+  4. forgejo-runner-manager (optional, separate execution plane)
+  5. gvm-manager
+  6. miniconda-manager
+  7. nvm-manager
 
 Phase 3 - AI runtime and edge
-  6. ollama-manager
-  7. nginx-manager
-  8. wireguard-manager
+  8. ollama-manager
+  9. nginx-manager
+ 10. wireguard-manager
 
 Phase 4 - AI agents
-  9. harness-manager
- 10. hermes-manager
- 11. codex-manager
- 12. claude-manager
- 13. opencode-manager
- 14. freebuff-manager
+ 11. harness-manager
+ 12. hermes-manager
+ 13. codex-manager
+ 14. claude-manager
+ 15. opencode-manager
+ 16. freebuff-manager
 
 Phase 5 - AI gateways/routing
- 15. litellm-manager
- 16. llmrouter-manager
+ 17. litellm-manager
+ 18. llmrouter-manager
 
-Phase 6 - Health gate
- 17. manager-suite
+Phase 6 - Isolated development and health gate
+ 19. project-manager
+ 20. manager-suite
 ```
 
 Display the same sequence from the installed suite:
@@ -118,6 +130,80 @@ manager-suite dependencies
 ```
 
 You do **not** have to install every runtime. Install only the components the server actually needs.
+
+## Isolated project development
+
+Host-level runtime managers are useful for server infrastructure, but they do
+not isolate one development project from another. Use `project-manager` when
+projects need different AGENTS.md instructions, Codex configuration, MCP
+servers, skills, plugins, credentials, dependencies, or agent state:
+
+```bash
+project-manager init /srv/projects/example example
+project-manager up /srv/projects/example
+project-manager shell /srv/projects/example
+```
+
+Each project receives a dedicated container, home directory, `CODEX_HOME`,
+Compose network, runtime definition, and source mount. Host AI configuration and
+the Docker socket are not mounted. See [PROJECT-ISOLATION.md](PROJECT-ISOLATION.md)
+for customization, security boundaries, backup, and restore.
+
+Optional project features keep their state within that same boundary:
+
+```bash
+project-manager feature-enable /srv/projects/example code-server
+project-manager feature-enable /srv/projects/example goose
+project-manager feature-enable /srv/projects/example opencodex
+project-manager feature-enable /srv/projects/example mulerouter
+project-manager tool-install /srv/projects/example goose
+project-manager secret-set /srv/projects/example mulerouter
+```
+
+```bash
+project-manager backup /srv/projects/example /srv/backups/example.tar.gz
+project-manager restore /srv/backups/example.tar.gz /srv/projects/example-restored
+```
+
+## Forgejo and Actions
+
+Forgejo is shared source-control infrastructure, while its Actions runner is a
+separate remote-code-execution trust zone:
+
+```bash
+sudo docker-manager install
+sudo forgejo-manager install
+sudo forgejo-manager start
+sudo forgejo-manager verify
+```
+
+Forgejo uses the dedicated rootless Docker daemon, a rootless Forgejo image,
+PostgreSQL, loopback-only HTTP/SSH defaults, disabled public registration and a
+private database network. Publish HTTP through the managed Nginx TLS edge.
+
+Install the runner on a separate VM whenever untrusted contributors can change
+workflows. The runner manager uses its own Unix account and rootless Podman
+socket and rejects host labels, privileged jobs, rootful Docker sockets and
+unpinned job images:
+
+```bash
+sudo forgejo-runner-manager install PINNED_VERSION
+sudo forgejo-runner-manager configure \
+  https://git.example.com/ RUNNER_UUID \
+  docker.io/library/node@sha256:FULL_DIGEST
+sudo forgejo-runner-manager start
+```
+
+Runner registration configuration also supports restricted backup and
+confirmed restore with `forgejo-runner-manager backup` and `restore FILE --yes`.
+
+Consistent Forgejo backup stops the stack, snapshots both named volumes, and
+restarts it if it was previously running:
+
+```bash
+sudo forgejo-manager backup /srv/backups/forgejo.tar.gz
+sudo forgejo-manager restore /srv/backups/forgejo.tar.gz --yes
+```
 
 ## First server setup
 
@@ -281,7 +367,7 @@ Do not execute a legacy manager in production without reviewing the older behavi
 ```text
 .
 ├── .github/workflows/validate.yml
-├── scripts/                 # 17 maintained executable managers
+├── scripts/                 # 20 maintained executable managers
 ├── legacy/                  # non-executable support snapshots
 ├── docs/                    # 19 current reference documents
 ├── qa/                      # release validation/regression checks
@@ -309,7 +395,7 @@ bash qa/validate-release.sh
 
 The release gate checks:
 
-- exactly 17 maintained manager scripts;
+- exactly 20 maintained manager scripts;
 - all maintained managers are version `1.0.1`;
 - Bash syntax;
 - manager `help` entry points;

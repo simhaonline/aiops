@@ -9,6 +9,8 @@ readonly RELEASE_VERSION="1.0.1"
 readonly MANAGERS=(
   system-manager
   docker-manager
+  forgejo-manager
+  forgejo-runner-manager
   gvm-manager
   miniconda-manager
   nvm-manager
@@ -23,6 +25,7 @@ readonly MANAGERS=(
   freebuff-manager
   litellm-manager
   llmrouter-manager
+  project-manager
   manager-suite
 )
 

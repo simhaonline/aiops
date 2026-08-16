@@ -17,6 +17,16 @@
       "sha256": "370d1a38f8846980979479e3b72c43cca7f5be0cff26569409581c8f7f909ccb",
       "size_bytes": 36725
     },
+    "forgejo-manager": {
+      "version": "1.0.1",
+      "sha256": "7996619d0faeb7b3607a93f6e8a6816d1bc40971ff09a8abdf287bbc50278c79",
+      "size_bytes": 8900
+    },
+    "forgejo-runner-manager": {
+      "version": "1.0.1",
+      "sha256": "dc7f67ff24e309cb5e9c72e796225d4ecfeec6066d87d777a1bc1caf961ac186",
+      "size_bytes": 7954
+    },
     "freebuff-manager": {
       "version": "1.0.1",
       "sha256": "b27163115f252110efa1a7726cc112046cb73183d064b247d5d60cf05c64e2b8",
@@ -49,8 +59,8 @@
     },
     "manager-suite": {
       "version": "1.0.1",
-      "sha256": "7f0c8e4434ef72adf1dcdd30045963034fa7c09c48faf1f895ff312ec3e9c3ec",
-      "size_bytes": 6101
+      "sha256": "7e480dc155d2c24f8f36fb2ce94685c7119b6ebdf8fd225cd93e751f704f5330",
+      "size_bytes": 7049
     },
     "miniconda-manager": {
       "version": "1.0.1",
@@ -76,6 +86,11 @@
       "version": "1.0.1",
       "sha256": "d6ab11af4c1747f14f004f268f1254c9da7c27767b411ed0004b8830dc5f74d9",
       "size_bytes": 7747
+    },
+    "project-manager": {
+      "version": "1.0.1",
+      "sha256": "08bd4c87e5ed772fc0805a92bec9fbf8aba5f621b229a93f0750510552edd1a1",
+      "size_bytes": 16878
     },
     "system-manager": {
       "version": "1.0.1",
@@ -273,7 +288,7 @@
     }
   ],
   "installer_policy": {
-    "default_installs": "17 canonical manager scripts only",
+    "default_installs": "20 canonical manager scripts only",
     "legacy_default": false,
     "main_ref_resolution": "resolve to immutable Git commit before payload fetch"
   }

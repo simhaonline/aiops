@@ -6,7 +6,7 @@ All maintained executable manager scripts now use manager version `1.0.1`.
 
 ### Installer
 
-- Rebuilt `install.sh` as the complete 17-manager bootstrap.
+- Rebuilt `install.sh` as the complete 20-manager bootstrap.
 - Exact supported bootstrap:
   `curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh | bash`
 - Downloads and verifies `SHA256SUMS.txt`.
@@ -54,7 +54,39 @@ All maintained executable manager scripts now use manager version `1.0.1`.
 ## Final bootstrap hardening
 
 - The exact `curl .../main/install.sh | bash` path now resolves `main` to one immutable Git commit before downloading `SHA256SUMS.txt` and manager payloads. This removes the multi-file race that could produce false checksum mismatches while `main` was changing.
-- Legacy support snapshots are now opt-in (`AIOPS_INSTALL_LEGACY=1`) and cannot block installation of the 17 maintained managers.
+- Legacy support snapshots are now opt-in (`AIOPS_INSTALL_LEGACY=1`) and cannot block installation of the maintained managers.
+
+## Isolated project development
+
+- Added `project-manager` for one-container-per-project development environments.
+- Project HOME, Codex home, skills, plugins, MCP configuration, dependencies,
+  network and agent state are isolated from the host and other projects.
+- Added full project backup with SHA-256 sidecars and traversal-safe restore into
+  an absent or empty destination.
+- Generated containers omit the host Docker socket, run unprivileged, drop Linux
+  capabilities and enable `no-new-privileges`.
+- Added per-project code-server, Goose, OpenCodex and MuleRouter feature support.
+- MuleRouter keys and generated code-server credentials stay in project-only
+  secret files rather than images or versioned project environment files.
+
+## Forgejo infrastructure
+
+- Added a rootless Forgejo 16.0.1 + PostgreSQL stack with loopback defaults,
+  disabled public registration and a private database network.
+- Added consistent stop/snapshot/restart backup and destructive-confirmed
+  restore for Forgejo application and database volumes.
+- Added a separate Forgejo Runner manager using a dedicated Unix identity and
+  rootless Podman socket.
+- Added checksum-backed runner registration backup and confirmed restore.
+- Runner policy rejects host labels, privileged execution, rootful Docker
+  sockets and job images that are not pinned by SHA-256 digest.
+
+## Operations documentation
+
+- Added an administrator operations guide covering trust zones, deployment,
+  lifecycle, security, monitoring, backup, restore, incidents and change control.
+- Added a user operations guide for daily isolated project, IDE, agent, provider,
+  Forgejo, backup and recovery workflows.
 - The checked-out canonical installer follows the same legacy policy.
 - `freebuff-manager` no longer performs a hidden first-run native-runtime download as part of `verify`; use `freebuff-manager bootstrap` for the visible upstream download/runtime step.
 - Release QA validates legacy explicitly but treats the GitHub Actions workflow as CI metadata rather than a runtime blocker.

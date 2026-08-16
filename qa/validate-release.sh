@@ -7,7 +7,7 @@ umask 027
 cd "$(dirname "$0")/.."
 
 readonly RELEASE_VERSION="1.0.1"
-readonly EXPECTED_MANAGERS=17
+readonly EXPECTED_MANAGERS=20
 readonly EXPECTED_LEGACY=17
 readonly EXPECTED_DOCS=19
 
@@ -21,6 +21,9 @@ required_root=(
   INSTALLATION-ORDER.md
   SECURITY.md
   RELEASE-NOTES.md
+  ADMIN-GUIDE.md
+  USER-GUIDE.md
+  PROJECT-ISOLATION.md
   MANIFEST.json
   QA-REPORT.txt
   SHA256SUMS.txt
@@ -43,7 +46,7 @@ fi
 manager_count="$(find scripts -maxdepth 1 -type f | wc -l)"
 [[ "$manager_count" -eq "$EXPECTED_MANAGERS" ]] || \
   die "Expected $EXPECTED_MANAGERS maintained manager scripts; found $manager_count."
-pass "17 maintained manager scripts"
+pass "20 maintained manager scripts"
 
 legacy_count="$(find legacy -maxdepth 1 -type f -name '*.sh' | wc -l)"
 [[ "$legacy_count" -eq "$EXPECTED_LEGACY" ]] || \
@@ -111,10 +114,10 @@ import re, sys
 order = Path(sys.argv[1]).read_text()
 deps = Path(sys.argv[2]).read_text()
 names = [
-"system-manager","docker-manager","gvm-manager","miniconda-manager","nvm-manager",
+"system-manager","docker-manager","forgejo-manager","forgejo-runner-manager","gvm-manager","miniconda-manager","nvm-manager",
 "ollama-manager","nginx-manager","wireguard-manager","harness-manager","hermes-manager",
 "codex-manager","claude-manager","opencode-manager","freebuff-manager","litellm-manager",
-"llmrouter-manager","manager-suite",
+"llmrouter-manager","project-manager","manager-suite",
 ]
 for n in names:
     if order.count(n) != 1:
@@ -168,7 +171,7 @@ import hashlib, json, zipfile
 root=Path(".")
 m=json.loads((root/"MANIFEST.json").read_text())
 assert m["release"]=="1.0.1"
-assert len(m["managers"])==17
+assert len(m["managers"])==20
 assert len(m["legacy_support"])==17
 assert len(m["documents"])==19
 
@@ -221,6 +224,12 @@ pass "Pipefail/SIGPIPE safety regression"
 
 qa/harness-ollama-models-regression-test.sh >/dev/null
 pass "Harness Ollama model-discovery regression"
+
+qa/project-manager-regression-test.sh >/dev/null
+pass "Project isolation backup/restore regression"
+
+qa/forgejo-isolation-regression-test.sh >/dev/null
+pass "Forgejo and runner trust-zone regression"
 
 # Test the real bootstrap download/check logic without Internet or mutation.
 # The mock covers both GitHub commit resolution and raw downloads from the
@@ -287,6 +296,7 @@ pass "Credential-pattern scan"
 if grep -RIn --exclude='validate-release.sh' --exclude='SHA256SUMS.txt' --exclude-dir='.git' \
     -E '/mnt/data/|/tmp/aiops-' \
     README.md ABOUT.md DEPENDENCIES.md INSTALLATION-ORDER.md SECURITY.md RELEASE-NOTES.md \
+    ADMIN-GUIDE.md USER-GUIDE.md PROJECT-ISOLATION.md \
     scripts legacy qa install.sh install-canonical-managers.sh sync-github-repo.sh 2>/dev/null | grep -q .; then
   die "Build-machine path leaked into release text/scripts."
 fi

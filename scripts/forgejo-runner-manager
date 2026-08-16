@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+
+readonly MANAGER_VERSION="1.0.1"
+readonly RUNNER_USER="forgejo-runner"
+readonly RUNNER_HOME="/var/lib/forgejo-runner"
+readonly RUNNER_BIN="/usr/local/bin/forgejo-runner"
+readonly CONFIG="$RUNNER_HOME/runner-config.yml"
+readonly SERVICE="forgejo-runner.service"
+readonly UNIT="/etc/systemd/system/$SERVICE"
+readonly FORGEJO_SIGNING_FPR="EB114F5E6C0DC2BCDD183550A4B61A2DC5923710"
+
+die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+info(){ printf '[INFO] %s\n' "$*"; }
+require_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root."; }
+valid_version(){ [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+runner_uid(){ id -u "$RUNNER_USER"; }
+
+ensure_account(){
+  if ! id "$RUNNER_USER" >/dev/null 2>&1; then
+    if getent group "$RUNNER_USER" >/dev/null; then
+      useradd --system --home-dir "$RUNNER_HOME" --create-home --shell /usr/sbin/nologin --gid "$RUNNER_USER" "$RUNNER_USER"
+    else
+      useradd --system --home-dir "$RUNNER_HOME" --create-home --shell /usr/sbin/nologin --user-group "$RUNNER_USER"
+    fi
+  fi
+  passwd -l "$RUNNER_USER" >/dev/null 2>&1 || true
+  install -d -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0700 "$RUNNER_HOME"
+}
+
+install_runner(){
+  require_root; local version="${1:-}" arch url tmp fpr
+  valid_version "$version" || die "Pin a runner version: forgejo-runner-manager install VERSION"
+  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "Unsupported architecture." ;; esac
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git gnupg podman uidmap slirp4netns fuse-overlayfs
+  ensure_account
+  tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' RETURN
+  url="https://code.forgejo.org/forgejo/runner/releases/download/v${version}/forgejo-runner-${version}-linux-${arch}"
+  curl -fsSL --proto '=https' --tlsv1.2 "$url" -o "$tmp/runner"
+  curl -fsSL --proto '=https' --tlsv1.2 "$url.asc" -o "$tmp/runner.asc"
+  GNUPGHOME="$tmp/gnupg"; export GNUPGHOME; install -d -m 0700 "$GNUPGHOME"
+  gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$FORGEJO_SIGNING_FPR"
+  fpr="$(gpg --batch --with-colons --fingerprint "$FORGEJO_SIGNING_FPR" | awk -F: '$1=="fpr"{print $10; exit}')"
+  [[ "$fpr" == "$FORGEJO_SIGNING_FPR" ]] || die "Forgejo signing fingerprint mismatch."
+  gpg --batch --verify "$tmp/runner.asc" "$tmp/runner"
+  install -o root -g root -m 0755 "$tmp/runner" "$RUNNER_BIN"
+  loginctl enable-linger "$RUNNER_USER"
+  local uid; uid="$(runner_uid)"
+  systemctl start "user@${uid}.service"
+  runuser -u "$RUNNER_USER" -- env HOME="$RUNNER_HOME" XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" systemctl --user enable --now podman.socket
+  write_unit
+  trap - RETURN; rm -rf -- "$tmp"
+  info "Runner installed but not configured or started. Use configure next."
+}
+
+write_unit(){
+  cat >"$UNIT" <<EOF
+[Unit]
+Description=Forgejo Runner (dedicated rootless Podman execution plane)
+After=network-online.target user@$(runner_uid).service
+Wants=network-online.target
+ConditionPathExists=$CONFIG
+
+[Service]
+Type=simple
+User=$RUNNER_USER
+Group=$RUNNER_USER
+Environment=HOME=$RUNNER_HOME
+Environment=XDG_RUNTIME_DIR=/run/user/$(runner_uid)
+Environment=DOCKER_HOST=unix:///run/user/$(runner_uid)/podman/podman.sock
+WorkingDirectory=$RUNNER_HOME
+ExecStart=$RUNNER_BIN daemon -c $CONFIG
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$RUNNER_HOME /run/user/$(runner_uid)
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$UNIT"; systemctl daemon-reload
+}
+
+configure(){
+  require_root; [[ -x "$RUNNER_BIN" ]] || die "Install the runner first."
+  local url="${1:-}" uuid="${2:-}" image="${3:-}" token
+  [[ "$url" =~ ^https://[^[:space:]]+/$ ]] || die "Forgejo URL must be HTTPS and end with /."
+  [[ "$uuid" =~ ^[A-Za-z0-9-]{16,64}$ ]] || die "Invalid runner UUID."
+  [[ "$image" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]] || die "Job image must be pinned by sha256 digest."
+  read -r -s -p 'Runner token: ' token; printf '\n'
+  [[ "$token" =~ ^[A-Za-z0-9._-]{20,}$ ]] || die "Invalid runner token."
+  cat >"$CONFIG" <<EOF
+log:
+  level: info
+runner:
+  capacity: 1
+  labels:
+    - "isolated:docker://$image"
+container:
+  docker_host: "unix:///run/user/$(runner_uid)/podman/podman.sock"
+  privileged: false
+server:
+  connections:
+    forgejo:
+      url: "$url"
+      uuid: "$uuid"
+      token: "$token"
+EOF
+  chown "$RUNNER_USER:$RUNNER_USER" "$CONFIG"; chmod 0600 "$CONFIG"; unset token
+  verify_config
+  info "Configured one-job-at-a-time isolated runner. Start it explicitly after reviewing $CONFIG."
+}
+
+verify_config(){
+  [[ -s "$CONFIG" ]] || die "Runner is not configured."
+  ! grep -Eq '(^|:)host($|:)|privileged:[[:space:]]*true|docker\.sock' "$CONFIG" || die "Unsafe host/privileged/rootful Docker configuration."
+  grep -Eq '@sha256:[0-9a-f]{64}' "$CONFIG" || die "Runner image is not digest-pinned."
+  grep -Fq "podman/podman.sock" "$CONFIG" || die "Dedicated Podman socket missing."
+}
+
+start(){ require_root; verify_config; systemctl enable --now "$SERVICE"; }
+stop(){ require_root; systemctl disable --now "$SERVICE"; }
+restart(){ require_root; verify_config; systemctl restart "$SERVICE"; }
+status(){ require_root; systemctl --no-pager --full status "$SERVICE" || true; }
+logs(){ require_root; journalctl -u "$SERVICE" -n "${1:-200}" --no-pager; }
+verify(){ require_root; verify_config; systemctl is-active --quiet "$SERVICE" || die "Runner is inactive."; info "FORGEJO RUNNER: VERIFIED"; }
+backup(){
+  require_root; verify_config; local output="${1:-/root/forgejo-runner-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"
+  [[ "$output" == /* ]] || die "Backup path must be absolute."
+  tar -C "$RUNNER_HOME" -czf "$output" runner-config.yml; chmod 0600 "$output"; sha256sum "$output" >"$output.sha256"; chmod 0600 "$output.sha256"
+  info "Runner configuration backup (contains registration token): $output"
+}
+restore(){
+  require_root; local archive="${1:-}" confirm="${2:-}" tmp
+  [[ -f "$archive" ]] || die "Backup not found: $archive"
+  [[ "$confirm" == --yes ]] || die "Restore replaces runner registration. Re-run with --yes."
+  [[ -f "$archive.sha256" ]] && (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive.sha256")")
+  [[ "$(tar -tzf "$archive")" == runner-config.yml ]] || die "Invalid runner backup contents."
+  ensure_account
+  tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' RETURN
+  tar -xzf "$archive" -C "$tmp" --no-same-owner --no-same-permissions
+  install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0600 "$tmp/runner-config.yml" "$CONFIG"
+  verify_config
+  trap - RETURN; rm -rf -- "$tmp"
+  info "Runner registration restored but not started. Review configuration, then start explicitly."
+}
+version(){ echo "forgejo-runner-manager $MANAGER_VERSION"; [[ -x "$RUNNER_BIN" ]] && "$RUNNER_BIN" -v || true; }
+help(){ cat <<EOF
+forgejo-runner-manager $MANAGER_VERSION
+Dedicated rootless Podman Forgejo Actions runner.
+
+Lifecycle: install PINNED_VERSION | configure URL/ UUID JOB_IMAGE@sha256:DIGEST
+           start | stop | restart | status | verify | logs [N]
+Protection: backup [ABSOLUTE_FILE] | restore FILE --yes
+
+The manager rejects host labels, privileged jobs, rootful Docker sockets and
+unpinned job images. Use repository/organization-scoped registration and run
+this execution plane on a separate VM when handling untrusted contributions.
+EOF
+}
+
+case "${1:-help}" in
+  install) install_runner "${2:-}" ;; configure) configure "${2:-}" "${3:-}" "${4:-}" ;;
+  start) start ;; stop) stop ;; restart) restart ;; status) status ;; verify) verify ;;
+  logs) logs "${2:-200}" ;; backup) backup "${2:-}" ;; restore) restore "${2:-}" "${3:-}" ;; version) version ;;
+  help|-h|--help) help ;; *) help; exit 2 ;;
+esac

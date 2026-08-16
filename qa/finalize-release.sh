@@ -76,7 +76,7 @@ manifest={
     "legacy_support": legacy,
     "documents": documents,
     "installer_policy": {
-        "default_installs": "17 canonical manager scripts only",
+        "default_installs": "20 canonical manager scripts only",
         "legacy_default": False,
         "main_ref_resolution": "resolve to immutable Git commit before payload fetch",
     },

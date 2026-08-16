@@ -15,6 +15,8 @@ INSTALL_LEGACY="${AIOPS_INSTALL_LEGACY:-0}"
 readonly MANAGERS=(
   system-manager
   docker-manager
+  forgejo-manager
+  forgejo-runner-manager
   gvm-manager
   miniconda-manager
   nvm-manager
@@ -29,6 +31,7 @@ readonly MANAGERS=(
   freebuff-manager
   litellm-manager
   llmrouter-manager
+  project-manager
   manager-suite
 )
 
@@ -232,7 +235,7 @@ main(){
       bash ./install-canonical-managers.sh all
   )
 
-  say "Installed all 17 canonical manager commands."
+  say "Installed all 20 canonical manager commands."
   say "No managed runtime/service was installed, repaired, restarted or updated."
   say "Recommended next steps:"
   say "  manager-suite install-order"

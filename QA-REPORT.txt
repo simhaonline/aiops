@@ -4,9 +4,10 @@ Final Release QA Report
 Status: PASS
 
 Inventory:
-- 17 maintained manager scripts
+- 20 maintained manager scripts
 - 17 legacy support snapshots
 - 19 canonical DOCX references
+- Administrator and user operations guides
 - 31 rendered DOCX pages visually inspected
 
 Validation gates:
@@ -24,15 +25,18 @@ PASS  Manifest metadata and DOCX package integrity
 PASS  DOCX build-machine path scan
 PASS  Docker fresh-install empty-backup regression
 PASS  system-manager regression
+PASS  Project isolation backup/restore regression
+PASS  Forgejo/Runner trust-zone regression
 PASS  Pipe-to-bash bootstrap logic dry-run with local mock transport
 PASS  Private-key scan
 PASS  Credential-pattern scan
 PASS  Plain-text build-machine path scan
 PASS  README exact one-line installer
 PASS  Repository sync helper disposable-Git regression
+PASS  Administrator/user operations documentation inventory
 
 Key release corrections:
-- install.sh now downloads, hashes and validates all 17 maintained managers.
+- install.sh now downloads, hashes and validates all 20 maintained managers.
 - Canonical install paths are /usr/local/bin except wireguard-manager at /usr/local/sbin.
 - Existing/stale manager scripts are backed up preserving their original path.
 - Legacy support snapshots are validated but never installed on executable PATH.

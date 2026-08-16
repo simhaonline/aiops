@@ -10,16 +10,22 @@
 
 1. `system-manager` - base package/security policy.
 2. `docker-manager`, `gvm-manager`, `miniconda-manager`, `nvm-manager` - core runtimes.
-3. `ollama-manager`, `nginx-manager`, `wireguard-manager` - AI runtime/edge/network.
-4. `harness-manager` - requires `nvm-manager` for Node and `ollama-manager` for the configured Ollama provider.
-5. `hermes-manager` - uses system build dependencies; Nginx optional.
-6. `codex-manager`, `claude-manager` - independent coding-agent runtimes.
-7. `opencode-manager`, `freebuff-manager`, `llmrouter-manager` - require NVM/Node.
-8. `litellm-manager` - Python/venv based; Nginx optional.
-9. `manager-suite` - cross-manager health/inventory.
+3. `forgejo-manager` - requires the dedicated rootless Docker daemon.
+4. `forgejo-runner-manager` - independent rootless Podman execution plane; separate VM recommended.
+5. `ollama-manager`, `nginx-manager`, `wireguard-manager` - AI runtime/edge/network.
+6. `harness-manager` - requires `nvm-manager` for Node and `ollama-manager` for the configured Ollama provider.
+7. `hermes-manager` - uses system build dependencies; Nginx optional.
+8. `codex-manager`, `claude-manager` - independent coding-agent runtimes.
+9. `opencode-manager`, `freebuff-manager`, `llmrouter-manager` - require NVM/Node.
+10. `litellm-manager` - Python/venv based; Nginx optional.
+11. `project-manager` - Docker Compose based, isolated per-project development.
+12. `manager-suite` - cross-manager health/inventory.
 
 ## Shared services
 
 `nginx-manager` is optional unless an application needs a public HTTPS edge. Backends should remain loopback-only.
 
 `manager-suite` is always safe to install; it does not install runtimes.
+
+`project-manager` requires Docker with the Compose plugin. It creates a separate
+home/configuration mount and Compose network for every project.
