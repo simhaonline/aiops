@@ -34,6 +34,7 @@ readonly MANAGERS=(
   collection-manager
   aiops-dashboard-manager
   manager-suite
+  aiops
 )
 
 TMP_DIR="$(mktemp -d)"
@@ -211,11 +212,12 @@ main(){
     as_root bash ./install-canonical-managers.sh all
   )
 
-  say "Installed all 22 canonical manager commands."
+  say "Installed all 23 canonical suite commands."
   say "No managed runtime/service was installed, repaired, restarted or updated."
   say "Recommended next steps:"
   say "  manager-suite install-order"
   say "  manager-suite dependencies"
+  say "  aiops list"
   say "  sudo system-manager install"
   say "Installer log: ${FINAL_LOG}"
 }

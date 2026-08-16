@@ -6,7 +6,8 @@ All maintained executable manager scripts now use manager version `1.0.0`.
 
 ### Installer
 
-- Rebuilt `install.sh` as the complete 22-manager bootstrap.
+- Rebuilt `install.sh` as the complete 23-command suite bootstrap.
+- Added `aiops`, a safe phase-aware CLI dispatcher for every runtime manager.
 - Exact supported bootstrap:
   `curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh | bash`
 - Downloads and verifies `SHA256SUMS.txt`.

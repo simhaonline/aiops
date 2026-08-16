@@ -2,6 +2,11 @@
   "release": "1.0.0",
   "target_os": "Ubuntu 24.04 LTS",
   "managers": {
+    "aiops": {
+      "version": "1.0.0",
+      "sha256": "55d1657dd3b90d43a81c177252295ccbac6504cc68afe7506c878d7bce1f8b80",
+      "size_bytes": 6653
+    },
     "aiops-dashboard-manager": {
       "version": "1.0.0",
       "sha256": "1b96e7ee43801d02a08a69ca2afa66da7eff6e1d00981decb901bb5cde1b0cbe",
@@ -114,7 +119,7 @@
     }
   },
   "installer_policy": {
-    "default_installs": "22 canonical manager scripts only",
+    "default_installs": "23 canonical suite commands only",
     "main_ref_resolution": "resolve to immutable Git commit before payload fetch"
   }
 }

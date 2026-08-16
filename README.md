@@ -28,7 +28,7 @@ This command:
 1. requires Ubuntu 24.04 LTS for install mode;
 2. resolves `main` (or the requested tag) to one immutable Git commit before downloading the release payload;
 3. downloads `SHA256SUMS.txt` from that exact commit;
-4. downloads all **22** maintained manager scripts from the same commit;
+4. downloads all **23** maintained suite commands from the same commit;
 5. verifies every downloaded manager against the checksum manifest;
 6. runs Bash syntax, `help`, and version checks;
 7. backs up existing canonical manager commands;
@@ -83,6 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/simhaonline/aiops/main/install.sh \
 | `collection-manager` | 1.0.0 | Isolated Scrapling collection policy, crawl, UI and recovery | **requires `project-manager` and Docker** |
 | `aiops-dashboard-manager` | 1.0.0 | Next.js/NestJS operations UI, Go broker and Python telemetry | **requires Docker and dashboard source** |
 | `manager-suite` | 1.0.0 | Cross-manager inventory/status/verification | none |
+| `aiops` | 1.0.0 | Unified, phase-aware command dispatcher for all runtime managers | manager scripts |
 
 Runtime/upstream application versions are independent from the manager suite version. For example, `nvm-manager 1.0.0` can manage a newer Node release without changing the manager's own version.
 
@@ -123,7 +124,8 @@ Phase 6 - Isolated development and health gate
  19. project-manager
  20. collection-manager (optional)
  21. aiops-dashboard-manager (optional)
- 22. manager-suite
+  22. manager-suite
+ 23. aiops (unified operational CLI)
 ```
 
 Display the same sequence from the installed suite:
@@ -131,7 +133,19 @@ Display the same sequence from the installed suite:
 ```bash
 manager-suite install-order
 manager-suite dependencies
+aiops list
 ```
+
+Run one manager through the unified CLI, or safely preview a phase-wide action:
+
+```bash
+sudo aiops run docker-manager -- status
+aiops run --phase agents --dry-run -- verify
+sudo aiops run --phase agents --continue-on-error -- restart
+```
+
+Mutating commands across multiple managers require `--yes`; use `--dry-run`
+first. Everything after `--` is passed literally to each selected manager.
 
 You do **not** have to install every runtime. Install only the components the server actually needs.
 
@@ -421,7 +435,7 @@ The maintained Miniconda manager:
 
 ```text
 .
-├── scripts/                 # 22 maintained executable managers
+├── scripts/                 # 23 maintained suite commands
 ├── dashboard/               # Next.js, NestJS, Go broker, Python telemetry
 ├── qa/                      # release validation/regression checks
 ├── README.md
@@ -448,7 +462,7 @@ bash qa/validate-release.sh
 
 The release gate checks:
 
-- exactly 22 maintained manager scripts;
+- exactly 23 maintained suite commands;
 - all maintained managers are version `1.0.0`;
 - Bash syntax;
 - manager `help` entry points;

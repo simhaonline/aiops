@@ -29,6 +29,7 @@ readonly MANAGERS=(
   collection-manager
   aiops-dashboard-manager
   manager-suite
+  aiops
 )
 
 die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }

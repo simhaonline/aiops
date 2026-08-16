@@ -44,7 +44,20 @@ sudo bash ./install-canonical-managers.sh all
 manager-suite versions
 manager-suite install-order
 manager-suite dependencies
+aiops list
 ```
+
+Use `aiops` for a consistent operational entry point. It can address a
+single manager, a dependency phase, or the complete suite:
+
+```bash
+sudo aiops run docker-manager -- status
+aiops run --phase agents --dry-run -- verify
+sudo aiops run --phase agents --continue-on-error -- restart
+```
+
+Bulk mutating commands require `--yes`. Always preview high-impact suite-wide
+operations with `--dry-run` before approval.
 
 This installs manager commands only. It does not install or start their managed
 runtimes.

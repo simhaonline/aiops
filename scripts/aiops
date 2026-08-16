@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+readonly MANAGER_VERSION="1.0.0"
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+readonly -a MANAGERS=(
+  system-manager
+  docker-manager forgejo-manager forgejo-runner-manager
+  gvm-manager miniconda-manager nvm-manager
+  ollama-manager nginx-manager wireguard-manager
+  harness-manager hermes-manager codex-manager claude-manager opencode-manager freebuff-manager
+  litellm-manager llmrouter-manager
+  project-manager collection-manager aiops-dashboard-manager
+)
+
+readonly -a MUTATING_COMMANDS=(
+  install repair update upgrade purge uninstall remove destroy restore
+  start stop restart enable disable reset edge-add edge-remove
+  schedule-add schedule-remove feature-enable feature-disable
+)
+
+die(){ printf '[aiops] ERROR: %s\n' "$*" >&2; exit 2; }
+log(){ printf '[aiops] %s\n' "$*"; }
+
+known_manager(){
+  local item
+  for item in "${MANAGERS[@]}"; do
+    [[ "$item" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+is_mutating(){
+  local item
+  for item in "${MUTATING_COMMANDS[@]}"; do
+    [[ "$item" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+manager_path(){
+  local manager="$1" local_path
+  if command -v "$manager" >/dev/null 2>&1; then
+    command -v "$manager"
+    return
+  fi
+  local_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/${manager}"
+  [[ -x "$local_path" ]] && { printf '%s\n' "$local_path"; return; }
+  return 1
+}
+
+phase_managers(){
+  case "$1" in
+    base) printf '%s\n' system-manager ;;
+    core) printf '%s\n' docker-manager forgejo-manager forgejo-runner-manager gvm-manager miniconda-manager nvm-manager ;;
+    runtime) printf '%s\n' ollama-manager nginx-manager wireguard-manager ;;
+    agents) printf '%s\n' harness-manager hermes-manager codex-manager claude-manager opencode-manager freebuff-manager ;;
+    gateways) printf '%s\n' litellm-manager llmrouter-manager ;;
+    platform) printf '%s\n' project-manager collection-manager aiops-dashboard-manager ;;
+    *) die "Unknown phase '$1'. Use: base, core, runtime, agents, gateways, platform." ;;
+  esac
+}
+
+list_managers(){
+  printf '%-26s %-10s %s\n' MANAGER PHASE LOCATION
+  local manager phase location
+  for manager in "${MANAGERS[@]}"; do
+    case "$manager" in
+      system-manager) phase=base ;;
+      docker-manager|forgejo-manager|forgejo-runner-manager|gvm-manager|miniconda-manager|nvm-manager) phase=core ;;
+      ollama-manager|nginx-manager|wireguard-manager) phase=runtime ;;
+      harness-manager|hermes-manager|codex-manager|claude-manager|opencode-manager|freebuff-manager) phase=agents ;;
+      litellm-manager|llmrouter-manager) phase=gateways ;;
+      *) phase=platform ;;
+    esac
+    location="$(manager_path "$manager" 2>/dev/null || true)"
+    printf '%-26s %-10s %s\n' "$manager" "$phase" "${location:-NOT INSTALLED}"
+  done
+}
+
+quote_command(){ printf '%q ' "$@"; printf '\n'; }
+
+run_targets(){
+  local dry_run="$1" assume_yes="$2" keep_going="$3" use_sudo="$4"
+  local target_count="$5"
+  shift 5
+  local -a targets=("${@:1:target_count}")
+  shift "$target_count"
+  local -a operation=("$@")
+  ((${#operation[@]} > 0)) || die "Missing manager command after '--'."
+
+  if ((${#targets[@]} > 1)) && is_mutating "${operation[0]}" && [[ "$assume_yes" != yes && "$dry_run" != yes ]]; then
+    die "Bulk '${operation[0]}' is mutating. Review with --dry-run, then repeat with --yes."
+  fi
+
+  local manager executable failed=0
+  for manager in "${targets[@]}"; do
+    executable="$(manager_path "$manager" 2>/dev/null || true)"
+    if [[ -z "$executable" ]]; then
+      log "SKIP $manager (manager command not installed)"
+      failed=1
+      [[ "$keep_going" == yes ]] && continue
+      return 1
+    fi
+    local -a command=("$executable" "${operation[@]}")
+    [[ "$use_sudo" == yes && ${EUID:-$(id -u)} -ne 0 ]] && command=(sudo "${command[@]}")
+    printf '==> %s: ' "$manager"
+    quote_command "${command[@]}"
+    [[ "$dry_run" == yes ]] && continue
+    if ! "${command[@]}"; then
+      log "FAILED $manager"
+      failed=1
+      [[ "$keep_going" == yes ]] || return 1
+    fi
+  done
+  ((failed == 0))
+}
+
+run_command(){
+  local dry_run=no assume_yes=no keep_going=no use_sudo=no selector=""
+  local -a selected=() operation=()
+  while (($#)); do
+    case "$1" in
+      --dry-run) dry_run=yes; shift ;;
+      --yes|-y) assume_yes=yes; shift ;;
+      --continue-on-error) keep_going=yes; shift ;;
+      --sudo) use_sudo=yes; shift ;;
+      --all) [[ -z "$selector" ]] || die "Choose only one target selector."; selector=all; selected=("${MANAGERS[@]}"); shift ;;
+      --phase) [[ -z "$selector" ]] || die "Choose only one target selector."; (($# >= 2)) || die "--phase needs a name."; selector=phase; mapfile -t selected < <(phase_managers "$2"); shift 2 ;;
+      --) shift; operation=("$@"); break ;;
+      -*) die "Unknown option: $1" ;;
+      *) [[ -z "$selector" ]] || die "Choose only one target selector."; known_manager "$1" || die "Unknown manager: $1"; selector=manager; selected=("$1"); shift ;;
+    esac
+  done
+  [[ -n "$selector" ]] || die "Select a manager, --phase NAME, or --all."
+  ((${#operation[@]})) || die "Separate the manager command with '--'."
+  run_targets "$dry_run" "$assume_yes" "$keep_going" "$use_sudo" "${#selected[@]}" "${selected[@]}" "${operation[@]}"
+}
+
+help(){
+  cat <<'EOF'
+aiops 1.0.0 - unified CLI for the SIMHA AiOps Manager Suite
+
+Usage:
+  aiops list
+  aiops run [OPTIONS] MANAGER -- COMMAND [ARG...]
+  aiops run [OPTIONS] --phase PHASE -- COMMAND [ARG...]
+  aiops run [OPTIONS] --all -- COMMAND [ARG...]
+  aiops status | verify | versions
+
+Run options:
+  --dry-run             Print the exact commands without executing them
+  --yes, -y             Approve a mutating command across multiple managers
+  --continue-on-error   Continue after missing or failed managers
+  --sudo                Run each manager through sudo when not already root
+
+Phases: base, core, runtime, agents, gateways, platform
+
+Examples:
+  aiops run docker-manager -- status
+  aiops run --phase agents --dry-run -- verify
+  aiops run --phase agents --continue-on-error --sudo -- restart
+  aiops run --all --dry-run -- update
+  aiops run --all --yes --continue-on-error --sudo -- update
+
+Bulk mutating operations require --yes. Prefer --dry-run first. Arguments after
+'--' are passed unchanged to every selected manager; no shell evaluation occurs.
+EOF
+}
+
+case "${1:-help}" in
+  list) list_managers ;;
+  run) shift; run_command "$@" ;;
+  status|verify|versions)
+    suite="$(manager_path manager-suite 2>/dev/null || true)"
+    [[ -n "$suite" ]] || die "manager-suite is not installed."
+    "$suite" "$1"
+    ;;
+  version) printf 'aiops %s\n' "$MANAGER_VERSION" ;;
+  help|-h|--help) help ;;
+  *) help >&2; exit 2 ;;
+esac

@@ -7,7 +7,7 @@ umask 027
 cd "$(dirname "$0")/.."
 
 readonly RELEASE_VERSION="1.0.0"
-readonly EXPECTED_MANAGERS=22
+readonly EXPECTED_MANAGERS=23
 
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 pass(){ printf '[PASS] %s\n' "$*"; }
@@ -35,7 +35,7 @@ pass "Required release files"
 manager_count="$(find scripts -maxdepth 1 -type f | wc -l)"
 [[ "$manager_count" -eq "$EXPECTED_MANAGERS" ]] || \
   die "Expected $EXPECTED_MANAGERS maintained manager scripts; found $manager_count."
-pass "22 maintained manager scripts"
+pass "23 maintained suite scripts"
 
 # Shell syntax: maintained managers, bootstrap and QA.
 for f in install.sh install-canonical-managers.sh scripts/* qa/*.sh; do
@@ -144,7 +144,7 @@ import hashlib, json
 root=Path(".")
 m=json.loads((root/"MANIFEST.json").read_text())
 assert m["release"]=="1.0.0"
-assert len(m["managers"])==22
+assert len(m["managers"])==23
 
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -186,6 +186,9 @@ pass "Dashboard architecture/security/telemetry regression"
 
 qa/forgejo-isolation-regression-test.sh >/dev/null
 pass "Forgejo and runner trust-zone regression"
+
+qa/aiops-regression-test.sh >/dev/null
+pass "Unified AiOps runtime CLI regression"
 
 # Test the real bootstrap download/check logic without Internet or mutation.
 # The mock covers both GitHub commit resolution and raw downloads from the
