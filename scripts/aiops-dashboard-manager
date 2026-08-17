@@ -96,11 +96,14 @@ services:
       AIOPS_DATABASE_URL: "\${AIOPS_DATABASE_URL:-}"
       AIOPS_DATABASE_SSL: "\${AIOPS_DATABASE_SSL:-require}"
       AIOPS_DATABASE_POOL_MAX: "\${AIOPS_DATABASE_POOL_MAX:-10}"
-      Q_AI_ENABLED: "\${Q_AI_ENABLED:-false}"
-      Q_AI_PRODUCTION_ACK: "\${Q_AI_PRODUCTION_ACK:-false}"
+      Q_AI_ENABLED: "\${Q_AI_ENABLED:-true}"
+      Q_AI_PRODUCTION_ACK: "\${Q_AI_PRODUCTION_ACK:-true}"
       Q_AI_SHADOW: "\${Q_AI_SHADOW:-false}"
-      Q_AI_MODELS_JSON: "\${Q_AI_MODELS_JSON:-[]}"
-      Q_AI_GATEWAY_URL: "\${Q_AI_GATEWAY_URL:-http://127.0.0.1:4000}"
+      Q_AI_MODELS_JSON: "\${Q_AI_MODELS_JSON:-[{\"provider\":\"ollama\",\"modelId\":\"qwen2.5:7b\",\"enabled\":true,\"reliability\":0.9,\"accuracy\":0.9,\"calibration\":0.85,\"latencyEfficiency\":0.7,\"costEfficiency\":1,\"taskFit\":0.9,\"domainFit\":0.8,\"independence\":0.8,\"availability\":1}]}"
+      Q_AI_MAX_PARALLEL_MODELS: "\${Q_AI_MAX_PARALLEL_MODELS:-1}"
+      Q_AI_MAX_ROUNDS: "\${Q_AI_MAX_ROUNDS:-1}"
+      Q_AI_TIMEOUT_MS: "\${Q_AI_TIMEOUT_MS:-60000}"
+      Q_AI_GATEWAY_URL: "\${Q_AI_GATEWAY_URL:-http://127.0.0.1:11434/v1}"
     network_mode: host
     group_add:
       - "\${AIOPS_DASHBOARD_GID}"
@@ -123,6 +126,8 @@ services:
       HOSTNAME: 127.0.0.1
       AIOPS_API_URL: http://127.0.0.1:11081
       AIOPS_DASHBOARD_TOKEN: "\${AIOPS_DASHBOARD_TOKEN}"
+      Q_AI_GATEWAY_URL: "\${Q_AI_GATEWAY_URL:-http://127.0.0.1:11434/v1}"
+      Q_AI_CHAT_MODEL: "\${Q_AI_CHAT_MODEL:-qwen2.5:7b}"
     network_mode: host
     depends_on: [api]
     read_only: true
