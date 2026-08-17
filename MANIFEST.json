@@ -84,8 +84,8 @@
     },
     "nginx-manager": {
       "version": "1.0.0",
-      "sha256": "d6660b2a84507d7818a024dfbdb1a0c5843671bbc7ba5f2072056ab47f9ee54f",
-      "size_bytes": 61377
+      "sha256": "389a766ec7009b1b24c8e95f961d1ca9de6fe964110cc07cd28262f29f3555a8",
+      "size_bytes": 61363
     },
     "nvm-manager": {
       "version": "1.0.0",
