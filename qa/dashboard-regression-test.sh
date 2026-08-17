@@ -56,6 +56,7 @@ grep -Fq 'HOSTNAME: 127.0.0.1' scripts/aiops-dashboard-manager
 ! grep -Fq 'HOSTNAME: 0.0.0.0' scripts/aiops-dashboard-manager
 grep -Fq 'cap_drop: [ALL]' scripts/aiops-dashboard-manager
 grep -Fq 'AIOPS_BROKER_SOCKET' scripts/aiops-dashboard-manager
+grep -Fq 'systemctl start --no-block aiops-dashboard.service' scripts/aiops-dashboard-manager
 ! grep -Fq '/var/run/docker.sock:' scripts/aiops-dashboard-manager
 
 scripts/aiops-dashboard-manager help >/dev/null

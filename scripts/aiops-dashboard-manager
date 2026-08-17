@@ -25,6 +25,28 @@ require_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root."; }
 require_command(){ command -v "$1" >/dev/null 2>&1 || die "Required command missing: $1"; }
 compose(){ docker compose --env-file "$ENV_FILE" -f "$COMPOSE" "$@"; }
 
+start_services(){
+  local elapsed state
+  systemctl enable aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service
+  systemctl start aiops-dashboard-broker.service aiops-dashboard-telemetry.service
+  info "Starting dashboard containers (the first image build can take several minutes)..."
+  systemctl start --no-block aiops-dashboard.service
+  for elapsed in $(seq 0 5 900); do
+    state="$(systemctl is-active aiops-dashboard.service 2>/dev/null || true)"
+    case "$state" in
+      active) info "Dashboard containers started."; return 0 ;;
+      failed)
+        journalctl -u aiops-dashboard.service -n 100 --no-pager >&2 || true
+        die "Dashboard container startup failed."
+        ;;
+    esac
+    (( elapsed == 0 || elapsed % 30 != 0 )) || info "Dashboard build still running (${elapsed}s elapsed)..."
+    sleep 5
+  done
+  journalctl -u aiops-dashboard.service -n 100 --no-pager >&2 || true
+  die "Dashboard startup timed out after 900 seconds."
+}
+
 ensure_identity(){
   getent group "$GROUP" >/dev/null || groupadd --system "$GROUP"
   getent passwd "$USER" >/dev/null || useradd --system --gid "$GROUP" --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$USER"
@@ -189,7 +211,7 @@ EOF
 install_dashboard(){
   require_root; require_command docker; require_command openssl; require_command python3
   docker compose version >/dev/null; ensure_identity; install_source "${1:-}"; build_broker; write_config; write_units
-  systemctl enable --now aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service
+  start_services
   verify; info "Dashboard installed on http://127.0.0.1:4600"
 }
 
@@ -237,7 +259,7 @@ EOF
 }
 
 case "${1:-help}" in
-  install) install_dashboard "${2:-}" ;; start) require_root; systemctl start aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service ;; stop) require_root; systemctl stop aiops-dashboard.service aiops-dashboard-telemetry.service aiops-dashboard-broker.service ;; restart) require_root; systemctl restart aiops-dashboard-broker.service aiops-dashboard-telemetry.service aiops-dashboard.service ;;
+  install) install_dashboard "${2:-}" ;; start) require_root; start_services ;; stop) require_root; systemctl stop aiops-dashboard.service aiops-dashboard-telemetry.service aiops-dashboard-broker.service ;; restart) require_root; systemctl stop aiops-dashboard.service aiops-dashboard-telemetry.service aiops-dashboard-broker.service; start_services ;;
   status) status ;; verify) verify ;; logs) logs "${2:-200}" ;; nginx-setup) nginx_setup "${2:-}" "${3:-}" "${4:-aiopsadmin}" ;; nginx-remove) require_root; /usr/local/bin/nginx-manager proxy-remove "${2:-}" ;; backup) backup "${2:-}" ;; restore) restore "${2:-}" "${3:-}" ;;
   version) echo "aiops-dashboard-manager $MANAGER_VERSION" ;; help|-h|--help) help ;; *) help >&2; exit 2 ;;
 esac

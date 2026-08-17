@@ -16,6 +16,7 @@ grep -Fq 'FORGEJO_HTTP_BIND=127.0.0.1' "$FORGEJO"
 grep -Fq 'internal: true' "$FORGEJO"
 grep -Fq 'DISABLE_REGISTRATION: "true"' "$FORGEJO"
 grep -Fq 'rootless' "$FORGEJO"
+grep -Fq -- '--chdir "$user_home"' "$FORGEJO"
 
 grep -Fq 'privileged: false' "$RUNNER"
 grep -Fq 'podman/podman.sock' "$RUNNER"

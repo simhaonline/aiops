@@ -19,11 +19,15 @@ require_command(){ command -v "$1" >/dev/null 2>&1 || die "Required command miss
 uid(){ id -u "$ROOTLESS_USER"; }
 
 rootless_docker(){
-  local user_uid
+  local user_uid user_home
   id "$ROOTLESS_USER" >/dev/null 2>&1 || die "Rootless Docker account missing: $ROOTLESS_USER"
   user_uid="$(uid)"
+  user_home="$(getent passwd "$ROOTLESS_USER" | cut -d: -f6)"
+  [[ -d "$user_home" ]] || die "Rootless Docker home is unavailable: $user_home"
   [[ -S "/run/user/$user_uid/docker.sock" ]] || die "Rootless Docker socket is unavailable. Run docker-manager install/repair."
-  runuser -u "$ROOTLESS_USER" -- env HOME="$(getent passwd "$ROOTLESS_USER" | cut -d: -f6)" \
+  # Never let the rootless process inherit /root as its working directory.
+  # Compose's schema loader stats its cwd even with an explicit project directory.
+  runuser -u "$ROOTLESS_USER" --chdir "$user_home" -- env HOME="$user_home" \
     XDG_RUNTIME_DIR="/run/user/$user_uid" DOCKER_HOST="unix:///run/user/$user_uid/docker.sock" \
     PATH="/usr/local/bin:/usr/bin:/bin" docker "$@"
 }

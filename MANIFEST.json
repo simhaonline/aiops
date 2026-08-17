@@ -9,8 +9,8 @@
     },
     "aiops-dashboard-manager": {
       "version": "1.0.0",
-      "sha256": "0ea591ce4a3bb8b3dde88bd9697e292fe0c37032a9381776f183153ca74b7fcc",
-      "size_bytes": 11411
+      "sha256": "dad00d30fdb5e36336fef7994b74e5fd8acf956047ac9c897460c958e17c7dbd",
+      "size_bytes": 12228
     },
     "claude-manager": {
       "version": "1.0.0",
@@ -34,8 +34,8 @@
     },
     "forgejo-manager": {
       "version": "1.0.0",
-      "sha256": "005dd4f539edb089cc8b9d252b8cc5d654f3421109ba3eaf5538a7c364f5f759",
-      "size_bytes": 8900
+      "sha256": "256cac0b91d6f054030650129c46f5b4e7248ee723a48692284c269586f2e4dc",
+      "size_bytes": 9195
     },
     "forgejo-runner-manager": {
       "version": "1.0.0",
@@ -44,8 +44,8 @@
     },
     "freebuff-manager": {
       "version": "1.0.0",
-      "sha256": "5a5d02de2c6a627eb7fd4ed3b83d7c8683abf5ee9c19fecd5964c3feaf176b3f",
-      "size_bytes": 8549
+      "sha256": "7e111c50e9abb87f4464e7cdc3768408ffa9df0ed30ec29e51ba9f4c61563e25",
+      "size_bytes": 8813
     },
     "gvm-manager": {
       "version": "1.0.0",
@@ -99,8 +99,8 @@
     },
     "opencode-manager": {
       "version": "1.0.0",
-      "sha256": "70e160511cee4908b5c7029beae0524bfbb5e71ef2677253f74b0f67ea4e8b51",
-      "size_bytes": 8439
+      "sha256": "09f52e8d5401600665277f5e5d3aa4ca18a71cb46d122c848bcb7eef2da983a5",
+      "size_bytes": 8560
     },
     "project-manager": {
       "version": "1.0.0",

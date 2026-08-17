@@ -33,6 +33,10 @@ require_nvm() {
 node_cmd() {
   bash --noprofile --norc -c 'set -Eeuo pipefail; export NVM_DIR=/root/.nvm; . "$NVM_DIR/nvm.sh" --no-use; nvm use default >/dev/null; exec "$@"' bash "$@"
 }
+node_exec() {
+  PATH="${NODE_BIN_LINK}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    "$@"
+}
 npm_install() { node_cmd npm install --global "$1"; }
 
 readonly PACKAGE="freebuff"
@@ -46,6 +50,7 @@ install_package() { npm_install "${PACKAGE}@${1:-latest}"; }
 write_wrapper() { cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
+export PATH="${NODE_BIN_LINK}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 exec ${BIN} "\$@"
 EOF
 chmod 0755 "$WRAPPER"; }
@@ -109,7 +114,7 @@ bootstrap_runtime() {
   info "Download/runtime errors are intentionally NOT hidden."
 
   local rc=0
-  if timeout --foreground "$BOOTSTRAP_TIMEOUT_SECONDS" "$BIN" --version; then
+  if node_exec timeout --foreground "$BOOTSTRAP_TIMEOUT_SECONDS" "$BIN" --version; then
     rc=0
   else
     rc=$?
@@ -139,7 +144,7 @@ runtime_check() {
   fi
 
   log "Freebuff runtime check"
-  if timeout --foreground 60 "$BIN" --version; then
+  if node_exec timeout --foreground 60 "$BIN" --version; then
     echo "FREEBUFF RUNTIME CHECK: PASS"
   else
     local rc=$?
@@ -253,5 +258,5 @@ case "${1:-help}" in
   install) install_fb;; repair) repair;; update) update;; reinstall) reinstall;; check-update) check_update;;
   bootstrap) bootstrap_runtime;; runtime-check) runtime_check;;
   status) status;; verify) verify_fb;; doctor) doctor;; version) version;;
-  cli) shift; exec "$BIN" "$@";; backup) backup "${2:-}";; help|-h|--help) help;; *) help; exit 2;;
+  cli) shift; export PATH="${NODE_BIN_LINK}:$PATH"; exec "$BIN" "$@";; backup) backup "${2:-}";; help|-h|--help) help;; *) help; exit 2;;
 esac

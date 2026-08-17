@@ -46,7 +46,7 @@ readonly HOST="127.0.0.1"
 readonly PORT="4096"
 
 install_deps() { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq util-linux openssl; }
-install_package() { npm_install "${PACKAGE}@${1:-latest}"; }
+install_package() { node_cmd npm install --global --allow-scripts="$PACKAGE" "${PACKAGE}@${1:-latest}"; }
 write_wrapper() { cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -71,6 +71,7 @@ Wants=network-online.target
 Type=simple
 User=root
 Environment=HOME=/root
+Environment=PATH=${NODE_BIN_LINK}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=${ENV_FILE}
 ExecStart=${BIN} web --hostname ${HOST} --port ${PORT}
 Restart=on-failure
@@ -89,7 +90,7 @@ WantedBy=multi-user.target
 EOF
 chmod 0644 "$UNIT"; systemctl daemon-reload; }
 install_oc() { begin; install_deps; require_nvm; install_package latest; write_wrapper; ensure_env; write_unit; verify_oc; }
-repair() { begin; install_deps; require_nvm; [[ -x "$BIN" ]] || install_package latest; write_wrapper; ensure_env; write_unit; verify_oc; }
+repair() { begin; install_deps; require_nvm; install_package latest; write_wrapper; ensure_env; write_unit; verify_oc; }
 reinstall() { begin; install_deps; require_nvm; backup >/dev/null; install_package latest; write_wrapper; ensure_env; write_unit; if systemctl is-active --quiet "$SERVICE"; then systemctl restart "$SERVICE"; fi; verify_oc; }
 update() { begin; require_nvm; install_package latest; write_wrapper; if systemctl is-active --quiet "$SERVICE"; then systemctl restart "$SERVICE"; fi; verify_oc; }
 check_update() { require_root; require_nvm; echo "installed=$($BIN --version 2>/dev/null || true)"; echo "latest=$(node_cmd npm view "$PACKAGE" version)"; }
