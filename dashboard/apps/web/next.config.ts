@@ -10,7 +10,10 @@ const config: NextConfig = {
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "Referrer-Policy", value: "same-origin" },
       { key: "Permissions-Policy", value: "camera=(self), microphone=(self), geolocation=()" },
-      { key: "Content-Security-Policy", value: "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'" }
+      // Next.js emits a small inline bootstrap for the App Router hydration.
+      // Without this allowance the browser blocks hydration and all client
+      // handlers (including sidebar navigation) remain inert.
+      { key: "Content-Security-Policy", value: "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'" }
     ] }];
   }
 };
