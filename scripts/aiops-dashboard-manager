@@ -31,7 +31,7 @@ start_services(){
   systemctl start aiops-dashboard-broker.service aiops-dashboard-telemetry.service
   info "Starting dashboard containers (the first image build can take several minutes)..."
   systemctl start --no-block aiops-dashboard.service
-  for elapsed in $(seq 0 5 900); do
+  for elapsed in $(seq 0 5 300); do
     state="$(systemctl is-active aiops-dashboard.service 2>/dev/null || true)"
     case "$state" in
       active) info "Dashboard containers started."; return 0 ;;
@@ -44,7 +44,7 @@ start_services(){
     sleep 5
   done
   journalctl -u aiops-dashboard.service -n 100 --no-pager >&2 || true
-  die "Dashboard startup timed out after 900 seconds."
+  die "Dashboard startup timed out after 300 seconds. Check npm/Docker registry connectivity."
 }
 
 ensure_identity(){
@@ -85,6 +85,7 @@ services:
     build:
       context: $APP_DIR
       dockerfile: Dockerfile.api
+      network: host
     restart: unless-stopped
     environment:
       AIOPS_API_PORT: "4601"
@@ -115,6 +116,7 @@ services:
     build:
       context: $APP_DIR
       dockerfile: Dockerfile.web
+      network: host
     restart: unless-stopped
     environment:
       PORT: "4600"
