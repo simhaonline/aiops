@@ -26,9 +26,11 @@ const featureCopy:Record<string,{eyebrow:string,title:string,description:string}
 };
 
 export function DashboardShell(){
-  const [overview,setOverview]=useState(fallback),[workspace,setWorkspace]=useState(workspaceFallback),[active,setActive]=useState("Studio"),[mode,setMode]=useState("text"),[prompt,setPrompt]=useState("");
+  const [overview,setOverview]=useState(fallback),[workspace,setWorkspace]=useState(workspaceFallback),[active,setActive]=useState("Studio"),[mode,setMode]=useState("text"),[prompt,setPrompt]=useState(""),[query,setQuery]=useState(""),[searchOpen,setSearchOpen]=useState(false);
   useEffect(()=>{Promise.allSettled([fetch("/api/overview").then(r=>r.ok?r.json():Promise.reject()),fetch("/api/workspace/capabilities").then(r=>r.ok?r.json():Promise.reject())]).then(([o,w])=>{if(o.status==="fulfilled")setOverview(o.value);if(w.status==="fulfilled")setWorkspace(w.value);});},[]);
+  useEffect(()=>{const onKey=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==="k"){event.preventDefault();setSearchOpen(true);document.querySelector<HTMLInputElement>("[aria-label='Search']")?.focus();}if(event.key==="Escape"){setSearchOpen(false);setQuery("");}};window.addEventListener("keydown",onKey);return()=>window.removeEventListener("keydown",onKey);},[]);
   const selected=useMemo(()=>workspace.modalities.find(x=>x.id===mode)??workspace.modalities[0],[workspace,mode]);
+  const results=navigation.filter(item=>item.label.toLowerCase().includes(query.toLowerCase())).slice(0,6);
   return <div className="shell studio-shell">
     <aside className="sidebar studio-sidebar">
       <div className="brand"><span className="brand-mark"><span/></span><div><b>SIMHA</b><small>Intelligence workspace</small></div></div>
@@ -38,7 +40,7 @@ export function DashboardShell(){
       <div className="sidebar-foot"><div className="environment"><span className="status-dot"/><div><b>Gateway online</b><small>{overview.host}</small></div></div><button className="profile" aria-label="Account menu">SO</button></div>
     </aside>
     <main className="studio-main">
-      <header className="studio-header"><div className="mobile-brand">SIMHA Studio</div><label className="search"><SearchIcon/><input placeholder="Search conversations, projects, knowledge and capabilities" aria-label="Search"/><kbd>⌘ K</kbd></label><div className="header-actions"><button className="header-link">Audit</button><span className="live"><i/>Live</span><ThemeToggle/></div></header>
+      <header className="studio-header"><div className="mobile-brand">SIMHA Studio</div><div className="search-wrap"><label className="search"><SearchIcon/><input value={query} onFocus={()=>setSearchOpen(true)} onChange={event=>{setQuery(event.target.value);setSearchOpen(true)}} placeholder="Search conversations, projects, knowledge and capabilities" aria-label="Search"/><kbd>⌘ K</kbd></label>{searchOpen&&<div className="search-results" role="listbox">{results.length?results.map(item=><button key={item.label} onClick={()=>{setActive(item.label);setSearchOpen(false);setQuery("")}}>{item.label}<span>Open workspace</span></button>):<p>No matching workspace</p>}</div>}</div><div className="header-actions"><button className="header-link" onClick={()=>setActive("Operations")}>Audit</button><span className="live"><i/>Live</span><ThemeToggle/></div></header>
       {active==="Studio"?<Studio workspace={workspace} selected={selected} mode={mode} setMode={setMode} prompt={prompt} setPrompt={setPrompt}/>:<FeaturePage active={active} overview={overview} workspace={workspace}/>}
     </main>
   </div>;
