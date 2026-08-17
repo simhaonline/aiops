@@ -4,7 +4,9 @@ COPY package.json ./
 COPY package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN npm ci --workspace=@aiops/api --include-workspace-root --no-audit --no-fund
+RUN npm ci --workspace=@aiops/api --include-workspace-root --no-audit --no-fund --ignore-scripts \
+    --fetch-timeout=60000 --fetch-retries=1 --fetch-retry-factor=2 \
+    --fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=10000
 COPY apps/api apps/api
 RUN npm run build --workspace=@aiops/api && npm prune --omit=dev
 

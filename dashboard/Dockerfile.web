@@ -4,7 +4,10 @@ COPY package.json ./
 COPY package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 COPY apps/api/package.json apps/api/package.json
-RUN npm ci --workspace=@aiops/web --include-workspace-root --no-audit --no-fund
+# Keep image builds bounded on hosts with flaky registry/DNS connectivity.
+RUN npm ci --workspace=@aiops/web --include-workspace-root --no-audit --no-fund --ignore-scripts \
+    --fetch-timeout=60000 --fetch-retries=1 --fetch-retry-factor=2 \
+    --fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=10000
 COPY apps/web apps/web
 RUN npm run build --workspace=@aiops/web
 
