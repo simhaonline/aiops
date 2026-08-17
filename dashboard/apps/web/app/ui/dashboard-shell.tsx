@@ -47,7 +47,8 @@ export function DashboardShell(){
 }
 
 function Studio({workspace,selected,mode,setMode,prompt,setPrompt}:{workspace:Workspace;selected:Capability;mode:string;setMode:(v:string)=>void;prompt:string;setPrompt:(v:string)=>void}){
-  const [reply,setReply]=useState(""),[sending,setSending]=useState(false);
+  const [reply,setReply]=useState(""),[sending,setSending]=useState(false),[uploading,setUploading]=useState(false),[fileName,setFileName]=useState("");
+  async function upload(file?:File){if(!file||uploading)return;setUploading(true);setReply("");try{const form=new FormData();form.append("file",file);const response=await fetch("/api/upload",{method:"POST",body:form});const payload=await response.json();if(!response.ok)throw new Error(payload.error??"upload failed");setFileName(payload.name);setReply(`Uploaded to quarantine: ${payload.name} (${Math.ceil(payload.size/1024)} KB)`);}catch(error){setReply(error instanceof Error?`Upload failed: ${error.message}`:"Upload failed.");}finally{setUploading(false);}}
   async function send(){
     const text=prompt.trim(); if(!text||sending)return;
     setSending(true); setReply("");
@@ -60,7 +61,7 @@ function Studio({workspace,selected,mode,setMode,prompt,setPrompt}:{workspace:Wo
       <div className="composer-context"><span>{selected.label} workspace</span><small>{selected.actions.join(" · ")}</small></div>
       <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter"){e.preventDefault();void send();}}} placeholder={placeholder(mode)} aria-label="Message"/>
       {reply&&<div className="chat-reply" role="status">{reply}</div>}
-      <div className="composer-actions"><div><button className="round" title="Attach files" onClick={()=>setReply("File attachments will be enabled when a workspace is connected.")}>＋</button><button className="tool-chip" onClick={()=>setReply("Context picker opened: connect a project or document to add context.")}>◎ Add context</button><button className="tool-chip" onClick={()=>setReply("Tool picker opened: no approved tools are configured yet.")}>◇ Tools</button></div><div><button className="model-chip" onClick={()=>setReply("Model routing is managed by the configured AI gateway.")}><span className="provider-dot"/>Auto · verified free <span>⌄</span></button><button className="send" disabled={!prompt.trim()||sending} onClick={()=>void send()} aria-label="Send">{sending?"…":<ArrowIcon/>}</button></div></div>
+      <div className="composer-actions"><div><input id="studio-upload" type="file" hidden onChange={e=>void upload(e.target.files?.[0])}/><label className="round" title="Attach files" htmlFor="studio-upload">＋</label>{fileName&&<span className="file-chip">{fileName}</span>}<button className="tool-chip" onClick={()=>setReply("Context picker opened: connect a project or document to add context.")}>◎ Add context</button><button className="tool-chip" onClick={()=>setReply("Tool picker opened: no approved tools are configured yet.")}>◇ Tools</button></div><div><button className="model-chip" onClick={()=>setReply("Model routing is managed by the configured AI gateway.")}><span className="provider-dot"/>Auto · verified free <span>⌄</span></button><button className="send" disabled={!prompt.trim()||sending} onClick={()=>void send()} aria-label="Send">{sending?"…":<ArrowIcon/>}</button></div></div>
     </section>
     <section className="starter-grid">
       <Starter number="01" title="Review a codebase" copy="Connect a repository, map its architecture and surface the highest-risk changes." action="Open code workspace" onClick={()=>setMode("code")}/>

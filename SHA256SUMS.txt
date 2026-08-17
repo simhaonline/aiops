@@ -44,13 +44,14 @@ c824877e73a7c2ad4b52e08840ba36f933e7c125b9e4a4f8ef1ba68dba5c2370  dashboard/apps
 fb2bf6382adfa7f45000706d9554a0fc34a19f067fdc744839b11bbd8b38e58b  dashboard/apps/web/app/[...segments]/page.tsx
 2cc6156464b8f7b90d305bdb55f08880d608dec8242d8eb01d49d2d73d663727  dashboard/apps/web/app/api/overview/route.ts
 b61787e76463fd8ea4a88d8a7059ef541fe57626b410081131a280ab5d8316d2  dashboard/apps/web/app/api/chat/route.ts
+1e5802c2f5d8d651f12403fd6d61d2f8230b13db75b7419422ee09662cad4b71  dashboard/apps/web/app/api/upload/route.ts
 ff86b839ecfeff49e633b14d51484309d1f92a66d84343e1b6582971a14cd622  dashboard/apps/web/app/api/workspace/capabilities/route.ts
 44170f6c0be4a73a499acf052ff0d8ed4ce4452b5fdedefad4f323071f2c7715  dashboard/apps/web/app/layout.tsx
 c3121433554259963bf88fbc298698f90e4fce012433bd0a4b5c7ffa91d6929f  dashboard/apps/web/app/page.tsx
 5288dd8338e6125564106822510ab08566bbcb3bcf49e6d1975774e4199e17a0  dashboard/apps/web/app/platform.css
 edf527e8fef19e6576e25d387e1873d7ccc19d8fafa2c3155e9d6fc658e42252  dashboard/apps/web/app/studio.css
 e6feed940fd92a1a3e821856f096f1b6ef8e977d05a612f842df3021457b5342  dashboard/apps/web/app/styles.css
-7d17a704d075ff3f57865a4140d69504d947095b10428f9cd628ed7dab3bf4be  dashboard/apps/web/app/ui/dashboard-shell.tsx
+34101da7e2688e09c5cb0a157b56d8386b931a39531cc8ee7ed18d43d185b1c9  dashboard/apps/web/app/ui/dashboard-shell.tsx
 d06ff82714f99ff64881746724d18ba52a412d1ab46040ee8f755995b2149242  dashboard/apps/web/app/ui/icons.tsx
 1ed904ff01d38db73c3bc2e64c1f6df15eedea195c5a36faecf9bbf7a2387725  dashboard/apps/web/app/ui/platform-dashboard.tsx
 06f91d939e2bb5679f2ef0f7bd7312d9b65108ae313452ebaa122ac5aaf39a58  dashboard/apps/web/app/ui/theme-toggle.tsx
