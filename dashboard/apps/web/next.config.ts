@@ -14,7 +14,7 @@ const config: NextConfig = {
       // Without this allowance the browser blocks hydration and all client
       // handlers (including sidebar navigation) remain inert.
       { key: "Content-Security-Policy", value: "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'" }
-    ] }];
+    ] }, { source: "/", headers: [{ key: "Cache-Control", value: "no-store, max-age=0" }] }];
   }
 };
 export default config;
