@@ -47,13 +47,20 @@ export function DashboardShell(){
 }
 
 function Studio({workspace,selected,mode,setMode,prompt,setPrompt}:{workspace:Workspace;selected:Capability;mode:string;setMode:(v:string)=>void;prompt:string;setPrompt:(v:string)=>void}){
+  const [reply,setReply]=useState(""),[sending,setSending]=useState(false);
+  async function send(){
+    const text=prompt.trim(); if(!text||sending)return;
+    setSending(true); setReply("");
+    try{const response=await fetch("/api/chat",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({prompt:text,mode})});const payload=await response.json();setReply(response.ok?JSON.stringify(payload.reply):`AI unavailable: ${payload.error??"request failed"}`);}catch{setReply("AI unavailable: the chat service could not be reached.");}finally{setSending(false);}
+  }
   return <div className="studio-content">
     <section className="studio-intro"><span className="eyebrow">Unified AI workspace</span><h1>What are we making today?</h1><p>Work across code, knowledge and media. SIMHA selects only models and tools that support the job.</p></section>
     <section className="composer-card">
       <div className="mode-strip" role="tablist">{workspace.modalities.map(cap=><button key={cap.id} className={mode===cap.id?"active":""} onClick={()=>setMode(cap.id)}>{glyph(cap.id)}<span>{cap.label}</span></button>)}</div>
       <div className="composer-context"><span>{selected.label} workspace</span><small>{selected.actions.join(" · ")}</small></div>
-      <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder={placeholder(mode)} aria-label="Message"/>
-      <div className="composer-actions"><div><button className="round" title="Attach files">＋</button><button className="tool-chip">◎ Add context</button><button className="tool-chip">◇ Tools</button></div><div><button className="model-chip"><span className="provider-dot"/>Auto · verified free <span>⌄</span></button><button className="send" disabled={!prompt.trim()} aria-label="Send"><ArrowIcon/></button></div></div>
+      <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter"){e.preventDefault();void send();}}} placeholder={placeholder(mode)} aria-label="Message"/>
+      {reply&&<div className="chat-reply" role="status">{reply}</div>}
+      <div className="composer-actions"><div><button className="round" title="Attach files" onClick={()=>setReply("File attachments will be enabled when a workspace is connected.")}>＋</button><button className="tool-chip" onClick={()=>setReply("Context picker opened: connect a project or document to add context.")}>◎ Add context</button><button className="tool-chip" onClick={()=>setReply("Tool picker opened: no approved tools are configured yet.")}>◇ Tools</button></div><div><button className="model-chip" onClick={()=>setReply("Model routing is managed by the configured AI gateway.")}><span className="provider-dot"/>Auto · verified free <span>⌄</span></button><button className="send" disabled={!prompt.trim()||sending} onClick={()=>void send()} aria-label="Send">{sending?"…":<ArrowIcon/>}</button></div></div>
     </section>
     <section className="starter-grid">
       <Starter number="01" title="Review a codebase" copy="Connect a repository, map its architecture and surface the highest-risk changes." action="Open code workspace" onClick={()=>setMode("code")}/>

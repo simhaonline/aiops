@@ -122,6 +122,7 @@ services:
       PORT: "11080"
       HOSTNAME: 127.0.0.1
       AIOPS_API_URL: http://127.0.0.1:11081
+      AIOPS_DASHBOARD_TOKEN: "\${AIOPS_DASHBOARD_TOKEN}"
     network_mode: host
     depends_on: [api]
     read_only: true
