@@ -17,5 +17,5 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 USER node
-EXPOSE 4601
+EXPOSE 11081
 CMD ["node","apps/api/dist/main.js"]

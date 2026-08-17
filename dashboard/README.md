@@ -12,10 +12,10 @@ request lifecycle, and trust boundaries.
 A security-first operations interface composed of four deliberately separate
 processes:
 
-- Next.js web UI on `127.0.0.1:4600`
-- NestJS API on `127.0.0.1:4601`
+- Next.js web UI on `127.0.0.1:11080`
+- NestJS API on `127.0.0.1:11081`
 - Go allowlisted operation broker on a protected Unix socket
-- Python telemetry collector on `127.0.0.1:9108`
+- Python telemetry collector on `127.0.0.1:11082`
 
 The web and API processes are unprivileged. Only the broker may invoke manager
 commands, and it accepts five fixed operations with strict project/name

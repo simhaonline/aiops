@@ -44,7 +44,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self,format,*args): return
 
 def main():
-    host=os.environ.get("AIOPS_TELEMETRY_HOST","127.0.0.1");port=int(os.environ.get("AIOPS_TELEMETRY_PORT","9108"))
+    host=os.environ.get("AIOPS_TELEMETRY_HOST","127.0.0.1");port=int(os.environ.get("AIOPS_TELEMETRY_PORT","11082"))
     if host not in ("127.0.0.1","::1"): raise SystemExit("telemetry must remain loopback-only")
     ThreadingHTTPServer((host,port),Handler).serve_forever()
 if __name__=="__main__": main()

@@ -88,10 +88,10 @@ services:
       network: host
     restart: unless-stopped
     environment:
-      AIOPS_API_PORT: "4601"
+      AIOPS_API_PORT: "11081"
       AIOPS_DASHBOARD_TOKEN: "\${AIOPS_DASHBOARD_TOKEN}"
       AIOPS_BROKER_SOCKET: /run/aiops-dashboard/broker.sock
-      AIOPS_TELEMETRY_URL: http://127.0.0.1:9108
+      AIOPS_TELEMETRY_URL: http://127.0.0.1:11082
       AIOPS_PROJECTS_ROOT: /srv/projects
       AIOPS_DATABASE_URL: "\${AIOPS_DATABASE_URL:-}"
       AIOPS_DATABASE_SSL: "\${AIOPS_DATABASE_SSL:-require}"
@@ -119,9 +119,9 @@ services:
       network: host
     restart: unless-stopped
     environment:
-      PORT: "4600"
+      PORT: "11080"
       HOSTNAME: 127.0.0.1
-      AIOPS_API_URL: http://127.0.0.1:4601
+      AIOPS_API_URL: http://127.0.0.1:11081
     network_mode: host
     depends_on: [api]
     read_only: true
@@ -174,7 +174,7 @@ Type=simple
 User=$USER
 Group=$GROUP
 Environment=AIOPS_TELEMETRY_HOST=127.0.0.1
-Environment=AIOPS_TELEMETRY_PORT=9108
+Environment=AIOPS_TELEMETRY_PORT=11082
 ExecStart=/usr/bin/python3 $APP_DIR/telemetry/collector.py
 Restart=on-failure
 RestartSec=3
@@ -214,7 +214,7 @@ install_dashboard(){
   require_root; require_command docker; require_command openssl; require_command python3
   docker compose version >/dev/null; ensure_identity; install_source "${1:-}"; build_broker; write_config; write_units
   start_services
-  verify; info "Dashboard installed on http://127.0.0.1:4600"
+  verify; info "Dashboard installed on http://127.0.0.1:11080"
 }
 
 verify(){
@@ -223,13 +223,13 @@ verify(){
   systemctl is-active --quiet aiops-dashboard-telemetry.service || die "Telemetry is inactive."
   systemctl is-active --quiet aiops-dashboard.service || die "Dashboard stack is inactive."
   [[ -S "$RUN_DIR/broker.sock" ]] || die "Broker socket missing."
-  curl -fsS http://127.0.0.1:9108/health >/dev/null || die "Telemetry health failed."
-  curl -fsS http://127.0.0.1:4601/api/health >/dev/null || die "API health failed."
-  curl -fsS http://127.0.0.1:4600/ >/dev/null || die "Web health failed."
+  curl -fsS http://127.0.0.1:11082/health >/dev/null || die "Telemetry health failed."
+  curl -fsS http://127.0.0.1:11081/api/health >/dev/null || die "API health failed."
+  curl -fsS http://127.0.0.1:11080/ >/dev/null || die "Web health failed."
   info "AIOPS DASHBOARD: VERIFIED"
 }
 
-nginx_setup(){ require_root; local domain="${1:-}" email="${2:-}" user="${3:-aiopsadmin}"; [[ -n "$domain" && -n "$email" ]] || die "Usage: aiops-dashboard-manager nginx-setup DOMAIN EMAIL [AUTH_USER]"; [[ -x /usr/local/bin/nginx-manager ]] || die "nginx-manager is required."; /usr/local/bin/nginx-manager proxy-add "$domain" http://127.0.0.1:4600 "$user"; /usr/local/bin/nginx-manager ssl-issue "$domain" "$email"; /usr/local/bin/nginx-manager site-verify "$domain"; }
+nginx_setup(){ require_root; local domain="${1:-}" email="${2:-}" user="${3:-aiopsadmin}"; [[ -n "$domain" && -n "$email" ]] || die "Usage: aiops-dashboard-manager nginx-setup DOMAIN EMAIL [AUTH_USER]"; [[ -x /usr/local/bin/nginx-manager ]] || die "nginx-manager is required."; /usr/local/bin/nginx-manager proxy-add "$domain" http://127.0.0.1:11080 "$user"; /usr/local/bin/nginx-manager ssl-issue "$domain" "$email"; /usr/local/bin/nginx-manager site-verify "$domain"; }
 backup(){ require_root; local out="${1:-/root/aiops-dashboard-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"; [[ "$out" == /* ]] || die "Backup path must be absolute."; tar -C / -czf "$out" etc/aiops-dashboard var/log/aiops-dashboard var/lib/aiops-dashboard; chmod 0600 "$out"; sha256sum "$out" >"$out.sha256"; chmod 0600 "$out.sha256"; echo "$out"; }
 restore(){
   require_root; local archive="${1:-}" confirm="${2:-}" entry
