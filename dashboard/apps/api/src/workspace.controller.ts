@@ -1,4 +1,5 @@
-import { Controller, Get } from "@nestjs/common";
+import { Controller, Get, UseGuards } from "@nestjs/common";
+import { WorkspaceAuthGuard } from "./auth.service";
 
 const modalities=[
   {id:"text",label:"Text",accept:["text/plain","text/markdown"],actions:["chat","summarize","rewrite","extract"]},
@@ -10,7 +11,7 @@ const modalities=[
   {id:"translation",label:"Translation",accept:["text/*","application/pdf","audio/*","video/*"],actions:["detect","translate","localize","subtitle"]},
 ];
 
-@Controller("workspace")
+@Controller("workspace") @UseGuards(WorkspaceAuthGuard)
 export class WorkspaceController {
   @Get("capabilities") capabilities(){return {
     product:"SIMHA AiOps Studio",version:"1.0.0",modalities,

@@ -3,9 +3,9 @@
 The dashboard includes the native SIMHA Studio product shell for text,
 codebases, PDFs and documents, images, video, voice, translation, knowledge,
 workflows, projects, operations, and a governed skills/agents/MCP/plugins
-registry. The current release provides the UI and capability contract; full
-streaming conversations, persistence, media workers, and workflow execution
-are subsequent backend layers. See [PRODUCT.md](PRODUCT.md) and the repository
+registry. The API now provides tenant-scoped persistence and a PostgreSQL-backed
+worker lifecycle for repository, knowledge, media, and workflow jobs. Provider
+credentials remain explicit configuration. See [PRODUCT.md](PRODUCT.md) and the repository
 root [ARCHITECTURE-REPORT.md](../ARCHITECTURE-REPORT.md) for the capability map,
 request lifecycle, and trust boundaries.
 
@@ -39,9 +39,9 @@ mode. The same shell resolves `/home`, `/api-keys`, `/playground`, `/models`,
 `/invoices`, `/users`, `/teams`, `/projects`, `/audit-logs`, `/security`,
 `/settings`, and `/docs` to safe management views.
 
-These views are currently mock-backed. Authentication, live usage aggregation,
-payment providers, API-key storage, and billing actions must be connected to
-the authenticated SaaS API before production use.
+These platform views remain separate from the workspace shell. Usage and billing
+providers are still integration work; workspace CRUD and operations job status
+are backed by the authenticated API.
 
 ## Q-AI orchestration
 
@@ -57,10 +57,19 @@ flags are intentionally false in the generated compose environment.
 
 ```bash
 npm install
+npm run dev:deps
+npm run db:migrate
 npm run build
+(cd apps/api && npm run worker)
 (cd broker && go test ./...)
 python3 -m unittest discover telemetry/tests
 ```
+
+`dev:deps` starts the PostgreSQL/MinIO services in `docker-compose.dev.yml`.
+Copy `.env.example` to a server-side environment file, configure
+`AIOPS_TENANT_ID`, and apply migrations before creating workspace records.
+Set `AIOPS_EMBEDDINGS_DEV=true` or `AIOPS_MEDIA_DEV=true` only for explicit
+local adapter tests; production requires real provider credentials.
 
 Use `aiops-dashboard-manager` for production installation, lifecycle, Nginx/TLS,
 verification, backup and restore.

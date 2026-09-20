@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
-import { Pool, PoolConfig } from "pg";
+import { Pool, PoolClient, PoolConfig, QueryResult } from "pg";
 
 /** Optional database boundary. The dashboard remains usable in read-only mode
  * when AIOPS_DATABASE_URL is not configured, while SaaS deployments get a
@@ -38,6 +38,21 @@ export class DatabaseService implements OnModuleDestroy {
   async query<T extends Record<string, unknown> = Record<string, unknown>>(text: string, values: readonly unknown[] = []) {
     if (!this.pool) throw new Error("AIOPS_DATABASE_URL is not configured");
     return this.pool.query<T>(text, values as unknown[]);
+  }
+
+  async withTenant<T>(tenantId: string, work: (client: PoolClient) => Promise<T>): Promise<T> {
+    if (!this.pool) throw new Error("AIOPS_DATABASE_URL is not configured");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+      const result = await work(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
   }
 
   async onModuleDestroy() { await this.pool?.end(); }

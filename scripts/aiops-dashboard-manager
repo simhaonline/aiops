@@ -74,11 +74,11 @@ build_broker(){
 }
 
 write_config(){
-  local gid token
+  local gid token tenant
   gid="$(getent group "$GROUP" | cut -d: -f3)"; [[ "$gid" =~ ^[0-9]+$ ]] || die "Unable to resolve dashboard group."
-  if [[ -f "$ENV_FILE" ]]; then token="$(awk -F= '$1=="AIOPS_DASHBOARD_TOKEN" {print $2}' "$ENV_FILE")"; else token="$(openssl rand -hex 32)"; fi
+  if [[ -f "$ENV_FILE" ]]; then token="$(awk -F= '$1=="AIOPS_DASHBOARD_TOKEN" {print $2}' "$ENV_FILE")"; tenant="$(awk -F= '$1=="AIOPS_TENANT_ID" {print $2}' "$ENV_FILE")"; else token="$(openssl rand -hex 32)"; tenant=""; fi
   install -d -o root -g "$GROUP" -m 0750 "$CONFIG_DIR"
-  printf 'AIOPS_DASHBOARD_TOKEN=%s\nAIOPS_DASHBOARD_GID=%s\n' "$token" "$gid" >"$ENV_FILE"; chown root:"$GROUP" "$ENV_FILE"; chmod 0640 "$ENV_FILE"
+  printf 'AIOPS_DASHBOARD_TOKEN=%s\nAIOPS_DASHBOARD_GID=%s\nAIOPS_TENANT_ID=%s\n' "$token" "$gid" "$tenant" >"$ENV_FILE"; chown root:"$GROUP" "$ENV_FILE"; chmod 0640 "$ENV_FILE"
   cat >"$COMPOSE" <<EOF
 services:
   api:
@@ -99,7 +99,7 @@ services:
       Q_AI_ENABLED: "\${Q_AI_ENABLED:-true}"
       Q_AI_PRODUCTION_ACK: "\${Q_AI_PRODUCTION_ACK:-true}"
       Q_AI_SHADOW: "\${Q_AI_SHADOW:-false}"
-      Q_AI_MODELS_JSON: "\${Q_AI_MODELS_JSON:-[{\"provider\":\"ollama\",\"modelId\":\"qwen2.5:7b\",\"enabled\":true,\"reliability\":0.9,\"accuracy\":0.9,\"calibration\":0.85,\"latencyEfficiency\":0.7,\"costEfficiency\":1,\"taskFit\":0.9,\"domainFit\":0.8,\"independence\":0.8,\"availability\":1}]}"
+      Q_AI_MODELS_JSON: "\${Q_AI_MODELS_JSON:-[{\"provider\":\"ollama\",\"modelId\":\"qwen3.5:cloud\",\"enabled\":true,\"reliability\":0.9,\"accuracy\":0.9,\"calibration\":0.85,\"latencyEfficiency\":0.7,\"costEfficiency\":1,\"taskFit\":0.9,\"domainFit\":0.8,\"independence\":0.8,\"availability\":1}]}"
       Q_AI_MAX_PARALLEL_MODELS: "\${Q_AI_MAX_PARALLEL_MODELS:-1}"
       Q_AI_MAX_ROUNDS: "\${Q_AI_MAX_ROUNDS:-1}"
       Q_AI_TIMEOUT_MS: "\${Q_AI_TIMEOUT_MS:-60000}"
@@ -110,6 +110,28 @@ services:
     volumes:
       - $RUN_DIR:$RUN_DIR
       - /srv/projects:/srv/projects:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+  worker:
+    build:
+      context: $APP_DIR
+      dockerfile: Dockerfile.api
+      network: host
+    command: ["node", "apps/api/dist/worker-main.js"]
+    restart: unless-stopped
+    environment:
+      AIOPS_DASHBOARD_TOKEN: "\${AIOPS_DASHBOARD_TOKEN}"
+      AIOPS_TENANT_ID: "\${AIOPS_TENANT_ID:-}"
+      AIOPS_DATABASE_URL: "\${AIOPS_DATABASE_URL:-}"
+      AIOPS_DATABASE_SSL: "\${AIOPS_DATABASE_SSL:-require}"
+      AIOPS_DATABASE_POOL_MAX: "\${AIOPS_DATABASE_POOL_MAX:-10}"
+      AIOPS_WORKER_ID: "dashboard-worker"
+      Q_AI_GATEWAY_URL: "\${Q_AI_GATEWAY_URL:-http://127.0.0.1:11434/v1}"
+    network_mode: host
+    depends_on: [api]
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
@@ -127,7 +149,7 @@ services:
       AIOPS_API_URL: http://127.0.0.1:11081
       AIOPS_DASHBOARD_TOKEN: "\${AIOPS_DASHBOARD_TOKEN}"
       Q_AI_GATEWAY_URL: "\${Q_AI_GATEWAY_URL:-http://127.0.0.1:11434/v1}"
-      Q_AI_CHAT_MODEL: "\${Q_AI_CHAT_MODEL:-qwen2.5:7b}"
+      Q_AI_CHAT_MODEL: "\${Q_AI_CHAT_MODEL:-qwen3.5:cloud}"
     network_mode: host
     depends_on: [api]
     read_only: true
@@ -235,7 +257,7 @@ verify(){
   info "AIOPS DASHBOARD: VERIFIED"
 }
 
-nginx_setup(){ require_root; local domain="${1:-}" email="${2:-}" user="${3:-aiopsadmin}"; [[ -n "$domain" && -n "$email" ]] || die "Usage: aiops-dashboard-manager nginx-setup DOMAIN EMAIL [AUTH_USER]"; [[ -x /usr/local/bin/nginx-manager ]] || die "nginx-manager is required."; /usr/local/bin/nginx-manager proxy-add "$domain" http://127.0.0.1:11080 "$user"; /usr/local/bin/nginx-manager ssl-issue "$domain" "$email"; /usr/local/bin/nginx-manager site-verify "$domain"; }
+nginx_setup(){ require_root; local domain="${1:-}" email="${2:-}"; [[ -n "$domain" && -n "$email" ]] || die "Usage: aiops-dashboard-manager nginx-setup DOMAIN EMAIL"; [[ -x /usr/local/bin/nginx-manager ]] || die "nginx-manager is required."; /usr/local/bin/nginx-manager proxy-add-public "$domain" http://127.0.0.1:11080; /usr/local/bin/nginx-manager ssl-issue "$domain" "$email"; /usr/local/bin/nginx-manager site-verify "$domain"; }
 backup(){ require_root; local out="${1:-/root/aiops-dashboard-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"; [[ "$out" == /* ]] || die "Backup path must be absolute."; tar -C / -czf "$out" etc/aiops-dashboard var/log/aiops-dashboard var/lib/aiops-dashboard; chmod 0600 "$out"; sha256sum "$out" >"$out.sha256"; chmod 0600 "$out.sha256"; echo "$out"; }
 restore(){
   require_root; local archive="${1:-}" confirm="${2:-}" entry
@@ -255,7 +277,7 @@ logs(){ require_root; journalctl -u aiops-dashboard.service -u aiops-dashboard-b
 help(){ cat <<EOF
 aiops-dashboard-manager $MANAGER_VERSION
 Lifecycle: install DASHBOARD_SOURCE_DIR | start | stop | restart | status | verify | logs [N]
-Edge: nginx-setup DOMAIN EMAIL [AUTH_USER] | nginx-remove DOMAIN
+Edge: nginx-setup DOMAIN EMAIL | nginx-remove DOMAIN
 Protection: backup [ABSOLUTE_FILE] | restore FILE --yes
 Inspection: version | help
 

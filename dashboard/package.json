@@ -6,6 +6,9 @@
   "scripts": {
     "build": "npm run build -w @aiops/web && npm run build -w @aiops/api",
     "dev": "npm run dev -w @aiops/web",
+    "dev:deps": "docker compose -f docker-compose.dev.yml up -d postgres minio",
+    "dev:deps:down": "docker compose -f docker-compose.dev.yml down",
+    "db:migrate": "for f in database/migrations/*.sql; do psql \"$AIOPS_DATABASE_URL\" -v ON_ERROR_STOP=1 -f \"$f\"; done",
     "test": "npm run build -w @aiops/api && npm run test -w @aiops/api && (cd broker && GOCACHE=/tmp/aiops-dashboard-go-cache go test ./...) && python3 -m unittest discover telemetry/tests"
   },
   "engines": {"node": ">=22"}

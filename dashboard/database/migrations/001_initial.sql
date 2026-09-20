@@ -1,7 +1,13 @@
 -- SIMHA AiOps SaaS foundation. Apply with a migration runner as a privileged
 -- database owner, then run the API with a least-privilege application role.
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- TimescaleDB is optional for local PostgreSQL/pgvector development. Production
+-- telemetry deployments should install it for hypertable acceleration.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb') THEN
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+  END IF;
+END $$;
 
 CREATE SCHEMA IF NOT EXISTS app;
 CREATE SCHEMA IF NOT EXISTS telemetry;
@@ -72,7 +78,11 @@ CREATE TABLE IF NOT EXISTS telemetry.request_events (
   status text NOT NULL CHECK (status IN ('success', 'error', 'cancelled')),
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb
 );
-SELECT create_hypertable('telemetry.request_events', 'occurred_at', if_not_exists => TRUE);
+DO $$ BEGIN
+  IF to_regprocedure('create_hypertable(regclass,name,boolean)') IS NOT NULL THEN
+    PERFORM create_hypertable('telemetry.request_events'::regclass, 'occurred_at', if_not_exists => TRUE);
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS request_events_tenant_time_idx ON telemetry.request_events (tenant_id, occurred_at DESC);
 
 ALTER TABLE app.tenants ENABLE ROW LEVEL SECURITY;
